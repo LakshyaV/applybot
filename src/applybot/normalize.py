@@ -124,6 +124,15 @@ US_WORDS = re.compile(
     re.I,
 )
 
+# Bare country / city names with no comma ("Singapore", "Hong Kong") that are unambiguously outside North America.
+INTL_WORDS = re.compile(
+    r"\b(singapore|hong kong|united kingdom|uk|england|london|ireland|dublin|germany|berlin|munich|france|paris|"
+    r"netherlands|amsterdam|switzerland|zurich|zürich|spain|madrid|barcelona|sweden|stockholm|poland|warsaw|"
+    r"india|bangalore|bengaluru|hyderabad|mumbai|japan|tokyo|china|shanghai|beijing|shenzhen|taiwan|taipei|"
+    r"south korea|seoul|australia|sydney|melbourne|israel|tel aviv|brazil|mexico|uae|dubai)\b",
+    re.I,
+)
+
 
 def location_country(location: str) -> str:
     text = location.strip()
@@ -144,6 +153,11 @@ def location_country(location: str) -> str:
         return country
     if not text or re.fullmatch(r"(multiple|various|n/?a|see posting|tbd).*", text, re.I):
         return "UNKNOWN"
+    # "Hong Kong +2": the other locations are not named, so the posting's countries are not known
+    if re.search(r"\+\s*\d+\b", text):
+        return "UNKNOWN"
+    if INTL_WORDS.search(text):
+        return "OTHER"
     # "City, Country" with no North-American marker → treat as international
     return "OTHER" if "," in text else "UNKNOWN"
 

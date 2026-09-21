@@ -62,6 +62,9 @@ def test_canonical_url_strips_tracking_but_keeps_job_params():
         (["Remote"], ["REMOTE"]),
         (["London, UK"], ["OTHER"]),
         (["Vancouver, BC", "Seattle, WA"], ["CA", "US"]),
+        (["Singapore"], ["OTHER"]),  # bare country name, no comma
+        (["London, ON"], ["CA"]),
+        (["Hong Kong +2"], ["UNKNOWN"]),  # the other two locations are not named
         ([], ["UNKNOWN"]),
     ],
 )
