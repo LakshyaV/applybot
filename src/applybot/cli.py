@@ -6,9 +6,10 @@ from collections import Counter
 
 import typer
 
-from . import db, filters
+from . import db, filters, preflight, resolve as rs
 from . import models as m
-from .config import load_config
+from .config import DATA_DIR, load_config, load_profile
+from .forms import greenhouse
 from .normalize import is_tracker
 from .sources import github_repo
 
@@ -125,6 +126,106 @@ def mark(job_id: int, status: str, reason: str = ""):
     if current["status"] == m.SUBMITTED and status != m.SUBMITTED:
         raise typer.BadParameter("a submitted job is final — one application per job, ever")
     db.set_status(conn, job_id, status, reason)
+
+
+@app.command()
+def survey(ats: str = "greenhouse", limit: int = 50):
+    """Read-only census: fetch form schemas via the ATS API, preflight the JD, record unanswered questions."""
+    import httpx
+
+    if ats != "greenhouse":
+        raise typer.BadParameter("only greenhouse exposes its form schema through a public API")
+    conn, profile = db.connect(), load_profile()
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE status = ? AND ats = ? ORDER BY priority, date_posted DESC, id LIMIT ?",
+        (m.QUEUED, ats, limit),
+    ).fetchall()
+    tally = Counter()
+    with httpx.Client(timeout=30) as client:
+        for row in rows:
+            try:
+                questions, meta = greenhouse.parse(greenhouse.fetch(row["board"], row["ats_job_id"], client))
+            except greenhouse.Gone:
+                db.set_status(conn, row["id"], m.CLOSED, "posting removed (ATS API 404)")
+                tally["gone"] += 1
+                continue
+            except httpx.HTTPError as err:
+                tally[f"error {type(err).__name__}"] += 1
+                continue
+            countries = meta["countries"] if meta["countries"] != ["UNKNOWN"] else json.loads(row["countries"])
+            conn.execute("UPDATE jobs SET countries = ? WHERE id = ?", (json.dumps(countries), row["id"]))
+            blocked, reason = preflight.check(meta["description"], countries)
+            if blocked:
+                db.set_status(conn, row["id"], blocked, reason)
+                tally[blocked] += 1
+                continue
+            run_dir = DATA_DIR / "runs" / str(row["id"])
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "schema.json").write_text(json.dumps(
+                {"meta": meta, "questions": [vars(q) for q in questions]}, indent=1, ensure_ascii=False))
+            ctx = rs.JobContext(row["company"], countries)
+            preset = greenhouse.preset_answers(questions, rs.Facts(profile, ctx), profile["resume_path"])
+            result = rs.resolve(conn, questions, profile, ctx, preset)
+            for q in result.misses:
+                rs.record_miss(conn, q, row["id"])
+            tally["ready" if result.ready else "blocked_on_answers"] += 1
+    pending = conn.execute("SELECT COUNT(*), SUM(high_stakes) FROM questions").fetchone()
+    typer.echo(f"surveyed={len(rows)}  " + "  ".join(f"{k}={v}" for k, v in tally.most_common()))
+    typer.echo(f"distinct unanswered questions: {pending[0]} (high-stakes: {pending[1] or 0})")
+
+
+@app.command()
+def questions(limit: int = 20, as_json: bool = typer.Option(False, "--json"), high_stakes: bool | None = None):
+    """Unanswered questions, most common first (deduped across jobs). Input for the `answerer`."""
+    conn = db.connect()
+    clause = "" if high_stakes is None else f"WHERE high_stakes = {int(high_stakes)}"
+    rows = conn.execute(f"SELECT * FROM questions {clause} ORDER BY job_count DESC, qhash LIMIT ?", (limit,)).fetchall()
+    for r in rows:
+        item = {"qhash": r["qhash"], "jobs": r["job_count"], "high_stakes": bool(r["high_stakes"]), "type": r["field_type"],
+                "label": r["label"], "options": json.loads(r["options"])}  # fmt: skip
+        if as_json:
+            typer.echo(json.dumps(item, ensure_ascii=False))
+        else:
+            flag = "!" if item["high_stakes"] else " "
+            opts = f"  {item['options'][:6]}" if item["options"] else ""
+            typer.echo(f"{item['qhash']} x{item['jobs']:<3}{flag} [{item['type']}] {item['label'][:110]}{opts}")
+
+
+@app.command("answers-import")
+def answers_import(path: str, origin: str = "llm"):
+    """Load proposed resolutions [{qhash, resolution}] into the bank. Every entry is validated; high-stakes
+    entries stay unusable until the user approves them."""
+    conn = db.connect()
+    ok, rejected = 0, []
+    for item in json.loads(open(path).read()):
+        row = conn.execute("SELECT * FROM questions WHERE qhash = ?", (item["qhash"],)).fetchone()
+        if row is None:
+            rejected.append((item["qhash"], "not a pending question"))
+            continue
+        q = rs.Question("", row["label"], row["field_type"], True, json.loads(row["options"]))
+        try:
+            rs.bank_put(conn, q, item["resolution"], origin, approved=False)
+            ok += 1
+        except ValueError as err:
+            rejected.append((item["qhash"], str(err)))
+    typer.echo(f"imported={ok} rejected={len(rejected)}")
+    for qhash, why in rejected:
+        typer.echo(f"  {qhash}: {why}")
+
+
+@app.command()
+def approvals(approve: list[str] = typer.Option([], help="qhash to approve (repeatable)"), as_json: bool = typer.Option(False, "--json")):
+    """High-stakes bank entries awaiting the USER's approval, phrased as the claim the form will make."""
+    conn = db.connect()
+    for qhash in approve:
+        conn.execute("UPDATE answer_bank SET approved = 1, origin = origin || '+user' WHERE qhash = ?", (qhash,))
+    rows = conn.execute("SELECT * FROM answer_bank WHERE high_stakes = 1 AND approved = 0 ORDER BY created_at").fetchall()
+    for r in rows:
+        q = rs.Question("", r["label"], r["field_type"], True, json.loads(r["options"]))
+        sentence = rs.assertion_sentence(q, json.loads(r["resolution"]))
+        typer.echo(json.dumps({"qhash": r["qhash"], "claim": sentence}, ensure_ascii=False) if as_json else f"{r['qhash']}  {sentence}")
+    if not rows:
+        typer.echo("nothing awaiting approval")
 
 
 @app.command()

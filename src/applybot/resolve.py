@@ -51,9 +51,12 @@ def question_hash(label: str, field_type: str, options: list[str]) -> str:
 HIGH_STAKES_RE = re.compile(
     r"sponsor|visa|authoriz|authoris|eligible to work|right to work|work permit|citizen|national(ity)?\b|"
     r"resident|u\.?s\.? person|itar|export control|\bear\b|clearance|convict|criminal|felony|misdemeanor|"
-    r"background check|drug|non-?compete|restrictive covenant|agreement|previously (been )?(employed|worked|applied)|"
-    r"former employee|relative|family member|government official|certif|attest|acknowledg|i agree|consent|"
-    r"licen[cs]e|18 years|legal age|relocat|salary|compensation|pay expectation|graduat|gpa|grade point|"
+    r"background check|drug|non-?compete|restrictive covenant|agreement|obligation|conflict of interest|"
+    r"(previously|ever|currently|formerly)[^.?]{0,30}(employed|worked|work for|applied|interviewed|contractor)|"
+    r"employed by|former employee|relative|family member|familial|relationship|government|public official|"
+    r"own, operate|outside (business|activit)|certif|attest|acknowledg|i agree|i understand|consent|"
+    r"licen[cs]e|18 years|legal age|relocat|salary|compensation|pay expectation|hourly rate|rate requirement|"
+    r"graduat|gpa|grade point|primary residence|reside|eligib|"
     r"artificial intelligence|\bai\b|chatgpt|generative|completed (this|the) application (yourself|myself)",
     re.I,
 )
