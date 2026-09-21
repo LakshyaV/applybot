@@ -1,0 +1,359 @@
+"""Answer resolution: profile facts + an exact-hash answer bank. There is NO fuzzy matching here.
+
+A question is identified by sha256(normalized label | field type | sorted normalized options). A lookup
+is an exact hit or a miss. Bank entries never store "Yes"/"No"; they store how each option maps onto a
+profile *fact*, so polarity ("Will you NOT require sponsorship?") lives in the reviewed mapping and the
+same entry answers correctly on a Canadian and a US posting.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import sqlite3
+import time
+from dataclasses import dataclass, field
+from datetime import date
+
+# --- questions ---------------------------------------------------------------------------------
+
+FIELD_TYPES = {"text", "textarea", "select", "multiselect", "checkbox", "file"}
+
+
+@dataclass
+class Question:
+    id: str  # ATS field name / DOM id
+    label: str
+    type: str
+    required: bool = False
+    options: list[str] = field(default_factory=list)
+    section: str = ""  # "", "eeo", "demographic"
+
+    @property
+    def qhash(self) -> str:
+        return question_hash(self.label, self.type, self.options)
+
+
+def normalize(text: str) -> str:
+    text = re.sub(r"<[^>]+>", " ", text or "").lower().replace("’", "'")
+    text = re.sub(r"[\s ]+", " ", text)
+    return text.strip(" *:\t\n")
+
+
+def question_hash(label: str, field_type: str, options: list[str]) -> str:
+    payload = "|".join([normalize(label), field_type, *sorted(normalize(o) for o in options)])
+    return hashlib.sha256(payload.encode()).hexdigest()[:20]
+
+
+# High-recall trigger list. Anything matching is high-stakes: it resolves only through a bank entry the
+# user has approved. False positives cost one extra approval; false negatives are the dangerous direction.
+HIGH_STAKES_RE = re.compile(
+    r"sponsor|visa|authoriz|authoris|eligible to work|right to work|work permit|citizen|national(ity)?\b|"
+    r"resident|u\.?s\.? person|itar|export control|\bear\b|clearance|convict|criminal|felony|misdemeanor|"
+    r"background check|drug|non-?compete|restrictive covenant|agreement|previously (been )?(employed|worked|applied)|"
+    r"former employee|relative|family member|government official|certif|attest|acknowledg|i agree|consent|"
+    r"licen[cs]e|18 years|legal age|relocat|salary|compensation|pay expectation|graduat|gpa|grade point|"
+    r"artificial intelligence|\bai\b|chatgpt|generative|completed (this|the) application (yourself|myself)",
+    re.I,
+)
+# Never automated regardless of bank contents (CLAUDE.md rules 5 and 6).
+HUMAN_ONLY_RE = re.compile(
+    r"social security|\bssn\b|social insurance|\bsin\b number|date of birth|\bdob\b|passport|driver'?s licen|"
+    r"bank account|arbitration|artificial intelligence|\bai\b (tool|assist)|chatgpt|generative ai|"
+    r"without (the )?(use|help|assistance) of|completed (this|the) application (yourself|myself)",
+    re.I,
+)
+
+
+def is_high_stakes(question: Question) -> bool:
+    return bool(HIGH_STAKES_RE.search(question.label) or question.section in ("eeo", "demographic"))
+
+
+# --- facts -------------------------------------------------------------------------------------
+
+
+@dataclass
+class JobContext:
+    company: str
+    countries: list[str]  # from normalize.countries_of, refined by the ATS at apply time
+
+    @property
+    def country(self) -> str | None:
+        """The single country whose work-authorization facts apply, or None when ambiguous."""
+        real = [c for c in self.countries if c in ("CA", "US")] + [c for c in self.countries if c == "OTHER"]
+        return real[0] if len(set(real)) == 1 else None
+
+
+class Unknown(Exception):
+    """The profile does not contain this fact (null) — only the user can supply it."""
+
+
+class Ambiguous(Exception):
+    """A country-dependent fact was needed but the job's country is unknown or mixed."""
+
+
+MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
+               "October", "November", "December"]  # fmt: skip
+COUNTRY_PARAM_FACTS = {"work_authorized", "requires_sponsorship"}
+DECLINE = "decline"
+
+
+class Facts:
+    """Read-only view of profile.md front-matter, exposed as flat fact keys."""
+
+    def __init__(self, profile: dict, ctx: JobContext):
+        self.p, self.ctx = profile, ctx
+
+    def get(self, key: str):
+        value = self._lookup(key)
+        if value is None:
+            raise Unknown(key)
+        return value
+
+    def _lookup(self, key: str):
+        if key in COUNTRY_PARAM_FACTS:
+            country = self.ctx.country
+            if country is None:
+                raise Ambiguous(key)
+            auth = self.p["work_authorization"]
+            field_name = "authorized" if key == "work_authorized" else key
+            return auth["by_country"].get(country, auth["default"])[field_name]
+        if key.startswith("eeo_"):
+            return self.p["eeo"].get(key[4:], DECLINE)
+        simple = self._simple()
+        if key not in simple:
+            raise KeyError(f"unknown fact key: {key}")
+        return simple[key]
+
+    def _simple(self) -> dict:
+        p = self.p
+        ident, links, addr = p["identity"], p["links"], p["address"]
+        edu, avail, hist = p["education"][0], p["availability"], p["history"]
+        auth = p["work_authorization"]
+        end = edu.get("end")  # "2030-04"
+        month = MONTH_NAMES[int(end[5:7]) - 1] if end else None
+        company = normalize(self.ctx.company)
+        worked_here = any(company in normalize(past) or normalize(past) in company
+                          for past in hist.get("previously_employed_at", [])) if company else None  # fmt: skip
+        return {
+            "first_name": ident["first_name"], "last_name": ident["last_name"], "full_name": ident["full_name"],
+            "preferred_name": ident["preferred_name"], "email": ident["email"], "phone": ident["phone_display"],
+            "phone_e164": ident["phone_e164"], "phone_national": ident["phone_national"],
+            "pronouns": ident.get("pronouns"), "over_18": ident.get("over_18"),
+            "linkedin": links["linkedin"], "github": links["github"], "website": links["website"],
+            "address_line1": addr.get("line1"), "city": addr.get("city"), "province_state": addr.get("province_state"),
+            "postal_code": addr.get("postal_code"), "country_of_residence": addr.get("country"),
+            "school": edu["school"], "degree": edu["degree"], "degree_level": edu["degree_level"], "major": edu["major"],
+            "gpa": None if edu.get("gpa") in (None, "do_not_disclose") else str(edu["gpa"]),
+            "grad_year": end[:4] if end else None, "grad_month": month,
+            "grad_date": f"{month} {end[:4]}" if end else None,
+            "school_start": edu.get("start"), "currently_enrolled": edu.get("currently_enrolled"),
+            "earliest_start": avail.get("earliest_start"), "latest_end": avail.get("latest_end"),
+            "duration_weeks": str(avail["duration_weeks"]) if avail.get("duration_weeks") else None,
+            "willing_to_relocate": avail.get("willing_to_relocate"), "full_time_available": avail.get("full_time"),
+            "citizenship": ", ".join(auth["citizenships"]),
+            "us_citizen": "United States" in auth["citizenships"], "canadian_citizen": "Canada" in auth["citizenships"],
+            "us_person_itar": auth.get("us_person_itar"), "work_auth_note": auth["by_country"]["US"].get("note"),
+            "has_security_clearance": auth.get("security_clearance") not in (None, "none"),
+            "criminal_conviction": hist.get("criminal_conviction"),
+            "non_compete": hist.get("non_compete_or_restrictive_agreement"),
+            "relatives_at_company": hist.get("relatives_at_company"),
+            "previously_applied": hist.get("previously_applied_default"),
+            "previously_employed_here": worked_here,
+            "how_did_you_hear": p["defaults"].get("how_did_you_hear"),
+            "salary_expectation": p["defaults"].get("salary_expectation"),
+            "certify_truthful": True if p["consents"].get("agent_may_certify_truthfulness") else None,
+            "sms_opt_in": p["consents"].get("sms_marketing_opt_in"),
+            "talent_community_opt_in": p["consents"].get("talent_community_opt_in"),
+            "today": date.today().isoformat(),
+        }  # fmt: skip
+
+
+EEO_KEYS = ("gender", "race_ethnicity", "hispanic_latino", "veteran_status", "disability", "lgbtq")
+# Minimal profile used only to enumerate fact keys, so validation can never drift from Facts._simple.
+_PROBE_PROFILE = {
+    "identity": dict.fromkeys(("first_name", "last_name", "full_name", "preferred_name", "email", "phone_display",
+                               "phone_e164", "phone_national"), ""),
+    "links": {"linkedin": "", "github": "", "website": ""}, "address": {},
+    "education": [{"school": "", "degree": "", "degree_level": "", "major": "", "end": "2030-04"}],
+    "availability": {}, "history": {}, "defaults": {}, "consents": {}, "eeo": {},
+    "work_authorization": {"citizenships": [], "by_country": {"US": {}}, "default": {}},
+}  # fmt: skip
+
+
+def fact_keys() -> set[str]:
+    simple = Facts(_PROBE_PROFILE, JobContext("", ["CA"]))._simple()
+    return set(simple) | COUNTRY_PARAM_FACTS | {f"eeo_{k}" for k in EEO_KEYS}
+
+
+# --- resolutions -------------------------------------------------------------------------------
+#
+# {"kind": "fact_text",   "fact": "linkedin"}                      fill the fact's text value
+# {"kind": "fact_option", "fact": "requires_sponsorship",          choose the option whose mapped value
+#                         "options": {"Yes": true, "No": false}}   equals the fact (country-aware)
+# {"kind": "fact_checkbox","fact": "certify_truthful"}              lone checkbox: ticked iff the fact is true
+# {"kind": "decline",     "option": "I don't wish to answer"}      EEO: always this option
+# {"kind": "literal",     "value": "…"}                            fixed text, or an option label
+# {"kind": "skip"}                                                 leave an optional field blank
+# {"kind": "per_job"}                                              essay written per job from the JD
+# {"kind": "human"}                                                never automated
+
+KINDS = {"fact_text", "fact_option", "fact_checkbox", "decline", "literal", "skip", "per_job", "human"}
+
+
+def validate_resolution(question: Question, res: dict) -> list[str]:
+    """Reject malformed or unsafe proposals (from an LLM or a human) before they reach the bank."""
+    errors = []
+    kind = res.get("kind")
+    if kind not in KINDS:
+        return [f"kind must be one of {sorted(KINDS)}"]
+    options = {normalize(o): o for o in question.options}
+    if HUMAN_ONLY_RE.search(question.label) and kind != "human":
+        errors.append("this question is human-only (ID numbers / AI-use attestations / arbitration)")
+    if kind in ("fact_text", "fact_option", "fact_checkbox") and res.get("fact") not in fact_keys():
+        errors.append(f"unknown fact {res.get('fact')!r}")
+    if kind == "fact_option":
+        mapping = res.get("options") or {}
+        if not mapping:
+            errors.append("fact_option needs an options map")
+        for label in mapping:
+            if normalize(label) not in options:
+                errors.append(f"option {label!r} is not on the form")
+        if len({json.dumps(v) for v in mapping.values()}) != len(mapping):
+            errors.append("two options map to the same fact value")
+    if kind in ("decline", "literal") and question.options:
+        chosen = res.get("option") if kind == "decline" else res.get("value")
+        if normalize(str(chosen)) not in options:
+            errors.append(f"{chosen!r} is not one of the form's options")
+    if kind == "fact_checkbox" and (question.type != "checkbox" or question.options):
+        errors.append("fact_checkbox is only for a lone checkbox")
+    if kind == "fact_text" and question.options:
+        errors.append("fact_text cannot answer a choice question; use fact_option")
+    if kind == "skip" and question.required:
+        errors.append("cannot skip a required question")
+    if kind == "literal" and is_high_stakes(question) and not question.options and len(str(res.get("value", ""))) > 200:
+        errors.append("long literal on a high-stakes question")
+    return errors
+
+
+def assertion_sentence(question: Question, res: dict) -> str:
+    """What the user is approving, phrased as the claim the form will make on their behalf."""
+    kind = res["kind"]
+    if kind == "fact_option":
+        pairs = "; ".join(f"“{label}” ⇔ {res['fact']} = {json.dumps(value)}" for label, value in res["options"].items())
+        scope = " (evaluated per job country)" if res["fact"] in COUNTRY_PARAM_FACTS else ""
+        return f"“{question.label}” → {pairs}{scope}"
+    if kind == "fact_checkbox":
+        return f"“{question.label}” → ticked only while {res['fact']} = true"
+    if kind == "fact_text":
+        return f"“{question.label}” → filled with your {res['fact']}"
+    if kind == "decline":
+        return f"“{question.label}” → always “{res['option']}”"
+    if kind == "literal":
+        return f"“{question.label}” → always “{res['value']}”"
+    return f"“{question.label}” → {kind}"
+
+
+# --- bank --------------------------------------------------------------------------------------
+
+
+def bank_put(conn: sqlite3.Connection, question: Question, res: dict, origin: str, approved: bool) -> None:
+    errors = validate_resolution(question, res)
+    if errors:
+        raise ValueError("; ".join(errors))
+    conn.execute(
+        "INSERT OR REPLACE INTO answer_bank (qhash, label, field_type, options, high_stakes, resolution, approved,"
+        " origin, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (question.qhash, question.label, question.type, json.dumps(question.options), int(is_high_stakes(question)),
+         json.dumps(res), int(approved), origin, int(time.time())),
+    )  # fmt: skip
+    conn.execute("DELETE FROM questions WHERE qhash = ?", (question.qhash,))
+
+
+def bank_get(conn: sqlite3.Connection, question: Question) -> tuple[dict, bool] | None:
+    row = conn.execute("SELECT resolution, approved FROM answer_bank WHERE qhash = ?", (question.qhash,)).fetchone()
+    return (json.loads(row["resolution"]), bool(row["approved"])) if row else None
+
+
+def record_miss(conn: sqlite3.Connection, question: Question, job_id: int, needs: str = "llm") -> None:
+    conn.execute(
+        "INSERT INTO questions (qhash, label, field_type, options, high_stakes, needs, example_job_id, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(qhash) DO UPDATE SET job_count = job_count + 1",
+        (question.qhash, question.label, question.type, json.dumps(question.options), int(is_high_stakes(question)),
+         needs, job_id, int(time.time())),
+    )  # fmt: skip
+    conn.execute("INSERT OR IGNORE INTO job_questions (job_id, qhash) VALUES (?, ?)", (job_id, question.qhash))
+
+
+# --- resolve -----------------------------------------------------------------------------------
+
+
+@dataclass
+class Resolved:
+    answers: dict[str, object] = field(default_factory=dict)  # question.id → text | option label | list | bool
+    essays: list[Question] = field(default_factory=list)  # per-job free text still to be written
+    misses: list[Question] = field(default_factory=list)  # not in the bank, or awaiting approval
+    needs_input: list[tuple[Question, str]] = field(default_factory=list)  # (question, missing fact)
+    human: list[tuple[Question, str]] = field(default_factory=list)
+
+    @property
+    def ready(self) -> bool:
+        return not (self.essays or self.misses or self.needs_input or self.human)
+
+
+def resolve(conn: sqlite3.Connection, questions: list[Question], profile: dict, ctx: JobContext,
+            preset: dict[str, object] | None = None) -> Resolved:  # fmt: skip
+    """preset: answers the ATS adapter already fixed by field id (first_name, resume, …)."""
+    out = Resolved(answers=dict(preset or {}))
+    facts = Facts(profile, ctx)
+    for q in questions:
+        if q.id in out.answers:
+            continue
+        if HUMAN_ONLY_RE.search(q.label):
+            if q.required:
+                out.human.append((q, "human-only question"))
+            continue
+        hit = bank_get(conn, q)
+        if hit is None or (is_high_stakes(q) and not hit[1]):
+            if q.required or hit is not None or is_high_stakes(q):
+                out.misses.append(q)
+            continue  # unknown optional low-stakes questions are left blank
+        res = hit[0]
+        try:
+            answer = _apply(q, res, facts)
+        except Unknown as missing:
+            if q.required:
+                out.needs_input.append((q, str(missing)))
+            continue
+        except Ambiguous:
+            out.human.append((q, "job country unknown or mixed; work-authorization facts are per country"))
+            continue
+        if res["kind"] == "per_job":
+            out.essays.append(q)
+        elif res["kind"] == "human":
+            out.human.append((q, "marked human-only in the bank"))
+        elif answer is not None:
+            out.answers[q.id] = answer
+    return out
+
+
+def _apply(q: Question, res: dict, facts: Facts):
+    kind = res["kind"]
+    if kind in ("skip", "per_job", "human"):
+        return None
+    if kind == "literal":
+        return res["value"]
+    if kind == "decline":
+        return res["option"]
+    value = facts.get(res["fact"])
+    if kind == "fact_text":
+        return str(value)
+    if kind == "fact_checkbox":
+        if value is not True and q.required:
+            raise Unknown(f"{res['fact']} is not true, so a required checkbox cannot be ticked")
+        return value is True
+    matches = [label for label, mapped in res["options"].items() if mapped == value]
+    if len(matches) != 1:
+        raise Unknown(f"{res['fact']}={value!r} has no matching option")
+    return matches[0]
