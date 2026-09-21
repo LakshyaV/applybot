@@ -119,6 +119,10 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
+    try:  # migration: the field's character limit, captured from the live form
+        conn.execute("ALTER TABLE essays ADD COLUMN max_chars INTEGER")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     return conn
 
 

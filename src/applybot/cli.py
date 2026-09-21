@@ -329,9 +329,19 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict
         result = rs.resolve(conn, questions, profile, ctx, preset)
         for q in result.misses:
             rs.record_miss(conn, q, job_id)
-        for q in result.essays:  # ask for exactly the essays this form requires
+        limits = {f["id"]: f.get("maxlength") for f in greenhouse.dom_census(page)}
+        for q in result.essays:  # ask for exactly the essays this form requires, with the field's size limit
             conn.execute("INSERT OR IGNORE INTO essays (job_id, question_id, label, created_at) VALUES (?,?,?,?)",
                          (job_id, q.id, q.label, int(time.time())))  # fmt: skip
+        for essay_id, limit in limits.items():
+            conn.execute("UPDATE essays SET max_chars = ? WHERE job_id = ? AND question_id = ?", (limit, job_id, essay_id))
+        too_long = conn.execute("SELECT question_id, max_chars FROM essays WHERE job_id = ? AND status = 'written' "
+                                "AND max_chars IS NOT NULL AND length(text) > max_chars", (job_id,)).fetchall()  # fmt: skip
+        if too_long:  # never let the browser truncate an answer mid-sentence
+            for row_ in too_long:
+                conn.execute("UPDATE essays SET status = 'pending' WHERE job_id = ? AND question_id = ?",
+                             (job_id, row_["question_id"]))  # fmt: skip
+            return finish(m.NEEDS_ANSWERS, f"essay longer than the field allows ({too_long[0]['max_chars']} characters): rewrite")
         (run_dir / "answers.json").write_text(json.dumps(result.answers, indent=1, ensure_ascii=False, default=str))
         if result.skip_job:
             return finish(m.SKIPPED_INELIGIBLE, "; ".join(f"{q.label[:60]} ({why})" for q, why in result.skip_job[:2]))
@@ -450,7 +460,7 @@ def essays(limit: int = 10, as_json: bool = typer.Option(False, "--json")):
     """Essays still to be written, each with the job context needed to write it truthfully."""
     conn = db.connect()
     rows = conn.execute(
-        "SELECT e.job_id, e.question_id, e.label, j.company, j.title FROM essays e JOIN jobs j ON j.id = e.job_id "
+        "SELECT e.job_id, e.question_id, e.label, e.max_chars, j.company, j.title FROM essays e JOIN jobs j ON j.id = e.job_id "
         "WHERE e.status = 'pending' AND j.status IN (?, ?) ORDER BY j.priority, e.job_id LIMIT ?",
         (m.NEEDS_ANSWERS, m.QUEUED, limit),
     ).fetchall()
@@ -458,7 +468,8 @@ def essays(limit: int = 10, as_json: bool = typer.Option(False, "--json")):
         schema_path = DATA_DIR / "runs" / str(r["job_id"]) / "schema.json"
         meta = json.loads(schema_path.read_text())["meta"] if schema_path.exists() else {}
         item = {"job_id": r["job_id"], "question_id": r["question_id"], "company": r["company"], "title": r["title"],
-                "question": r["label"], "job_description": (meta.get("description") or "")[:1800]}  # fmt: skip
+                "question": r["label"], "max_chars": r["max_chars"] or 1500,
+                "job_description": (meta.get("description") or "")[:1800]}  # fmt: skip
         typer.echo(json.dumps(item, ensure_ascii=False) if as_json else
                    f"{r['job_id']:>6} {r['company'][:22]:<22} {r['title'][:34]:<34} :: {r['label'][:90]}")  # fmt: skip
     if not rows:
@@ -473,10 +484,11 @@ def essays_import(path: str):
     ok, rejected = 0, []
     for item in json.loads(open(path).read()):
         text = (item.get("text") or "").strip()
-        row = conn.execute("SELECT label FROM essays WHERE job_id = ? AND question_id = ?",
+        row = conn.execute("SELECT label, max_chars FROM essays WHERE job_id = ? AND question_id = ?",
                            (item["job_id"], item["question_id"])).fetchone()  # fmt: skip
+        limit = (row["max_chars"] if row else None) or 1500
         problem = ("no such pending essay" if row is None else "too short" if len(text) < 40 else
-                   "too long (keep under 1500 characters)" if len(text) > 1500 else
+                   f"too long: {len(text)} characters, the field allows {limit}" if len(text) > limit else
                    "contains a placeholder or AI boilerplate" if PLACEHOLDER_RE.search(text) else "")  # fmt: skip
         if problem:
             rejected.append((item["job_id"], item["question_id"], problem))

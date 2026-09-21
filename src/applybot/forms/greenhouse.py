@@ -193,6 +193,7 @@ def dom_census(page) -> list[dict]:
              kind: el.type === 'file' ? 'file' : el.type === 'checkbox' ? 'checkbox'
                  : el.getAttribute('role') === 'combobox' ? 'select' : el.tagName === 'TEXTAREA' ? 'textarea' : 'text',
              required: el.getAttribute('aria-required') === 'true' || el.required,
+             maxlength: el.maxLength > 0 ? el.maxLength : null,
              label: (document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.innerText || '').replace(/\\*\\s*$/, '').trim(),
           }))"""
     )
@@ -216,6 +217,8 @@ def dom_only_questions(page, api_questions: list[Question], company: str) -> lis
 def _apply(page, field_id: str, value: object, kind: str) -> None:
     if kind == "file":
         page.locator(f'[id="{field_id}"]').set_input_files(str(value))  # hidden input; never click "Attach"
+        # the upload is asynchronous: the filename chip appears only once the server has accepted the file
+        page.get_by_text(str(value).rsplit("/", 1)[-1], exact=True).first.wait_for(state="visible", timeout=30_000)
     elif kind == "select":
         choose(page, field_id, str(value))
     elif kind == "checkbox":
@@ -227,7 +230,11 @@ def _apply(page, field_id: str, value: object, kind: str) -> None:
             if value is True or label in wanted:
                 box.check()
     else:
-        page.locator(f'[id="{field_id}"]').fill(str(value))
+        box = page.locator(f'[id="{field_id}"]')
+        limit = box.evaluate("el => el.maxLength > 0 ? el.maxLength : null")
+        if limit and len(str(value)) > limit:  # the browser would silently cut the text off mid-sentence
+            raise FillError(f"{field_id}: answer is {len(str(value))} characters but the field allows {limit}")
+        box.fill(str(value))
 
 
 def fill(page, questions: list[Question], answers: dict[str, object], facts) -> dict:
