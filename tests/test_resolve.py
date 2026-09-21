@@ -255,3 +255,36 @@ def test_question_naming_two_countries_goes_to_the_human(conn):
              "llm", approved=True)  # fmt: skip
     out = resolve(conn, [q], PROFILE, CA)
     assert out.answers == {} and out.human
+
+
+# --- user policies: undisclosed GPA, and human-only questions that are optional --------------------
+
+
+def test_required_gpa_skips_the_job_when_the_user_does_not_disclose_it(conn):
+    undisclosed = copy.deepcopy(PROFILE)
+    undisclosed["education"][0]["gpa"] = "do_not_disclose"
+    required = Question("g1", "What is your GPA?", "text", True)
+    optional = Question("g2", "GPA (optional)", "text", False)
+    for q in (required, optional):
+        bank_put(conn, q, {"kind": "fact_text", "fact": "gpa"}, "user", approved=True)
+    out = resolve(conn, [required, optional], undisclosed, US)
+    assert out.answers == {} and [q.id for q, _ in out.skip_job] == ["g1"] and not out.ready
+
+
+def test_skip_job_kind_only_bites_when_the_form_requires_the_question(conn):
+    bucket_req = Question("b1", "Select your GPA range", "select", True, ["3.5-4.0", "3.0-3.49", "Below 3.0"])
+    bucket_opt = Question("b2", "Select your GPA range (optional)", "select", False, ["3.5-4.0", "3.0-3.49"])
+    for q in (bucket_req, bucket_opt):
+        bank_put(conn, q, {"kind": "skip_job", "why": "requires a GPA bucket"}, "user", approved=True)
+    assert resolve(conn, [bucket_opt], PROFILE, US).ready
+    out = resolve(conn, [bucket_req], PROFILE, US)
+    assert out.skip_job and out.skip_job[0][1] == "requires a GPA bucket"
+
+
+def test_human_only_bank_entry_blocks_only_when_required(conn):
+    optional = Question("h1", "How many years of Python experience do you have?", "select", False, ["0-1", "2+"])
+    required = Question("h2", "How many years of Rust experience do you have?", "select", True, ["0-1", "2+"])
+    for q in (optional, required):
+        bank_put(conn, q, {"kind": "human"}, "llm", approved=False)
+    out = resolve(conn, [optional, required], PROFILE, US)
+    assert out.answers == {} and [q.id for q, _ in out.human] == ["h2"]

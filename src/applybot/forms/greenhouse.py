@@ -140,6 +140,29 @@ def choose(page, field_id: str, option: str, typeahead: bool = False) -> None:
         raise FillError(f"{field_id}: chose {option!r} but the form holds {_committed(page, field_id)!r}")
 
 
+LOCATION_FIELD = "candidate-location"  # "Location (City)": a geocoder typeahead that also fills hidden lat/long
+
+
+def choose_location(page, field_id: str, city: str, region: str, country: str) -> None:
+    """Type the applicant's own city and pick the geocoder suggestion naming that city AND country (and the
+    region when the suggestion shows one). The suggestion wording is the geocoder's, so it cannot be an
+    exact-string match — but only the user's own city is ever accepted."""
+    box = page.locator(f'[id="{field_id}"]')
+    box.click()
+    box.fill(city)
+    page.locator(MENU_OPTION).first.wait_for(state="visible", timeout=10_000)
+    page.wait_for_timeout(600)  # let the async list settle; selecting early leaves the hidden lat/long empty
+    for option in page.locator(MENU_OPTION).all():
+        text = option.inner_text().strip()
+        parts = [p.strip().lower() for p in text.split(",")]
+        if parts[0] == city.lower() and country.lower() in parts and (len(parts) < 3 or region.lower() in parts):
+            option.click()
+            if city.lower() not in _committed(page, field_id).lower():
+                raise FillError(f"{field_id}: location did not commit")
+            return
+    raise FillError(f"{field_id}: no suggestion for {city}, {region}, {country}")
+
+
 def dom_census(page) -> list[dict]:
     """Every fillable control on the form: id, kind, required, label. The API schema is not complete."""
     return page.evaluate(
@@ -163,7 +186,7 @@ def dom_only_questions(page, api_questions: list[Question], company: str) -> lis
         base = f["id"].split("[]")[0]
         if f["id"] in known or base in known or f["kind"] in ("file", "checkbox"):
             continue
-        if f["id"] in DOM_TYPEAHEAD_PRESETS or f["id"] in DOM_TEXT_PRESETS:
+        if f["id"] in DOM_TYPEAHEAD_PRESETS or f["id"] in DOM_TEXT_PRESETS or f["id"] == LOCATION_FIELD:
             continue  # answered from the profile by fixed id
         options = read_options(page, f["id"]) if f["kind"] == "select" else []
         extra.append(Question(f["id"], f["label"], f["kind"], f["required"], options, company=company))
@@ -200,6 +223,9 @@ def fill(page, questions: list[Question], answers: dict[str, object], facts) -> 
     for field_id, fact in DOM_TYPEAHEAD_PRESETS.items():
         if field_id in dom:
             choose(page, field_id, str(facts.get(fact)), typeahead=True)
+    if LOCATION_FIELD in dom:
+        choose_location(page, LOCATION_FIELD, str(facts.get("city")), str(facts.get("province_state")),
+                        str(facts.get("country_of_residence")))  # fmt: skip
 
     pending = {k: v for k, v in answers.items() if v is not None}
     for _ in range(4):

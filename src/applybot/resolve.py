@@ -244,6 +244,19 @@ class Facts:
             "grad_year": end[:4] if end else None, "grad_month": month,
             "grad_date": f"{month} {end[:4]}" if end else None,
             "school_start": edu.get("start"), "currently_enrolled": edu.get("currently_enrolled"),
+            "school_start_year": (edu.get("start") or "")[:4] or None,
+            "coop_program": edu.get("coop_program"),
+            "class_standing": edu.get("class_standing_fall_2026"),
+            "high_school_grad_year": edu.get("high_school_grad_year"),
+            "pending_criminal_charges": hist.get("pending_criminal_charges"),
+            # for questions that ask about "convictions OR pending charges" in one breath; unknown if either is
+            "criminal_conviction_or_charges": (
+                None if None in (hist.get("criminal_conviction"), hist.get("pending_criminal_charges"))
+                else bool(hist.get("criminal_conviction") or hist.get("pending_criminal_charges"))
+            ),
+            "has_outstanding_offers": hist.get("outstanding_offers_or_deadlines"),
+            "finance_licences": hist.get("finance_licences"),
+            "military_service": hist.get("military_service"),
             "earliest_start": avail.get("earliest_start"), "latest_end": avail.get("latest_end"),
             "duration_weeks": str(avail["duration_weeks"]) if avail.get("duration_weeks") else None,
             "willing_to_relocate": avail.get("willing_to_relocate"), "full_time_available": avail.get("full_time"),
@@ -295,7 +308,8 @@ def fact_keys() -> set[str]:
 # {"kind": "per_job"}                                              essay written per job from the JD
 # {"kind": "human"}                                                never automated
 
-KINDS = {"fact_text", "fact_option", "fact_checkbox", "decline", "literal", "skip", "per_job", "human"}
+# {"kind": "skip_job",    "why": "requires a GPA"}                  user policy: if this is REQUIRED, skip the job
+KINDS = {"fact_text", "fact_option", "fact_checkbox", "decline", "literal", "skip", "skip_job", "per_job", "human"}
 
 
 def validate_resolution(question: Question, res: dict) -> list[str]:
@@ -383,6 +397,9 @@ def bank_get(conn: sqlite3.Connection, question: Question) -> tuple[dict, bool] 
 
 
 def record_miss(conn: sqlite3.Connection, question: Question, job_id: int, needs: str = "llm") -> None:
+    conn.execute("INSERT OR IGNORE INTO job_questions (job_id, qhash) VALUES (?, ?)", (job_id, question.qhash))
+    if conn.execute("SELECT 1 FROM answer_bank WHERE qhash = ?", (question.qhash,)).fetchone():
+        return  # already answered, only awaiting clearance — not an unanswered question
     conn.execute(
         "INSERT INTO questions (qhash, label, field_type, options, high_stakes, needs, example_job_id, created_at)"
         " VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(qhash) DO UPDATE SET job_count = job_count + 1",
@@ -402,10 +419,11 @@ class Resolved:
     misses: list[Question] = field(default_factory=list)  # not in the bank, or awaiting approval
     needs_input: list[tuple[Question, str]] = field(default_factory=list)  # (question, missing fact)
     human: list[tuple[Question, str]] = field(default_factory=list)
+    skip_job: list[tuple[Question, str]] = field(default_factory=list)  # user policy says: don't apply to this one
 
     @property
     def ready(self) -> bool:
-        return not (self.essays or self.misses or self.needs_input or self.human)
+        return not (self.essays or self.misses or self.needs_input or self.human or self.skip_job)
 
 
 def resolve(conn: sqlite3.Connection, questions: list[Question], profile: dict, ctx: JobContext,
@@ -429,7 +447,7 @@ def resolve(conn: sqlite3.Connection, questions: list[Question], profile: dict, 
                 continue  # voluntary and no decline option offered → leave blank
         hit = bank_get(conn, q)
         # "human" and "skip" assert nothing on the user's behalf, so they need no clearance.
-        asserts = hit is not None and hit[0]["kind"] not in ("human", "skip")
+        asserts = hit is not None and hit[0]["kind"] not in ("human", "skip", "skip_job")
         if hit is None or (is_high_stakes(q) and asserts and not hit[1]):
             if q.required or hit is not None or is_high_stakes(q):
                 out.misses.append(q)
@@ -438,14 +456,20 @@ def resolve(conn: sqlite3.Connection, questions: list[Question], profile: dict, 
         try:
             answer = _apply(q, res, facts)
         except Unknown as missing:
-            if q.required:
+            if q.required and str(missing) == "gpa" and profile["education"][0].get("gpa") == "do_not_disclose":
+                out.skip_job.append((q, "form requires a GPA and the user does not disclose it"))
+            elif q.required:
                 out.needs_input.append((q, str(missing)))
             continue
         except Ambiguous:
             out.human.append((q, "job country unknown or mixed; work-authorization facts are per country"))
             continue
-        if res["kind"] == "skip" and q.required:
+        if not q.required and res["kind"] in ("skip", "skip_job", "human"):
+            continue  # optional on THIS form → leave it blank instead of blocking the application
+        if res["kind"] == "skip":
             out.human.append((q, "banked as skip but this form requires it"))
+        elif res["kind"] == "skip_job":
+            out.skip_job.append((q, res.get("why", "user policy")))
         elif res["kind"] == "per_job":
             out.essays.append(q)
         elif res["kind"] == "human":
@@ -482,7 +506,7 @@ def effective_fact(label: str, fact: str) -> str:
 
 def _apply(q: Question, res: dict, facts: Facts):
     kind = res["kind"]
-    if kind in ("skip", "per_job", "human"):
+    if kind in ("skip", "skip_job", "per_job", "human"):
         return None
     if kind == "literal":
         return res["value"]

@@ -232,6 +232,10 @@ def answers_import(path: str, origin: str = "llm", replace: bool = typer.Option(
                 rejected.append((item["qhash"], f"prefix matches {len(matches)} questions"))
                 continue
             item["qhash"] = matches[0]["qhash"]
+        banked = conn.execute("SELECT approved FROM answer_bank WHERE qhash = ?", (item["qhash"],)).fetchone()
+        if banked and (banked["approved"] or not replace):  # never clobber a cleared entry; uncleared needs --replace
+            rejected.append((item["qhash"], "already in the bank" + (" and cleared" if banked["approved"] else "")))
+            continue
         row = conn.execute("SELECT * FROM questions WHERE qhash = ?", (item["qhash"],)).fetchone()
         if row is None and replace:
             row = conn.execute("SELECT * FROM answer_bank WHERE qhash = ? AND approved = 0", (item["qhash"],)).fetchone()
@@ -322,6 +326,8 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict
         for q in result.misses:
             rs.record_miss(conn, q, job_id)
         (run_dir / "answers.json").write_text(json.dumps(result.answers, indent=1, ensure_ascii=False, default=str))
+        if result.skip_job:
+            return finish(m.SKIPPED_INELIGIBLE, "; ".join(f"{q.label[:60]} ({why})" for q, why in result.skip_job[:2]))
         if result.human:
             return finish(m.NEEDS_HUMAN, "; ".join(f"{q.label[:60]} ({why})" for q, why in result.human[:3]))
         if result.needs_input:
@@ -397,6 +403,10 @@ def run(limit: int = 5, headless: bool = False):
     if mode not in ("dry_run", "supervised", "auto"):
         raise typer.BadParameter(f"mode {mode!r} is not runnable here")
     submit = mode in ("supervised", "auto")
+    if submit and profile.get("resume_needs_update"):
+        typer.echo(json.dumps({"stopped": "resume_needs_update is set in profile.md — forms and resume disagree",
+                               "detail": profile["resume_needs_update"]}))  # fmt: skip
+        return
     db.recover(conn)
     if submit:  # forms that already passed a dry run are vetted: put them back at the front of the queue
         conn.execute("UPDATE jobs SET status = ?, reason = 'passed dry run' WHERE status = ?", (m.QUEUED, m.DRY_RUN_DONE))
@@ -423,6 +433,20 @@ def run(limit: int = 5, headless: bool = False):
         finally:
             context.close()
     typer.echo(json.dumps({"mode": mode, "summary": dict(tally)}))
+
+
+@app.command()
+def requeue(statuses: str = "needs_answers,needs_input,needs_human,failed,dry_run_done", ats: str = "greenhouse"):
+    """Put parked jobs back in the queue after the answer bank or profile changed. Never touches a job that
+    was submitted, is mid-submit, or is awaiting reconciliation."""
+    allowed = {m.NEEDS_ANSWERS, m.NEEDS_INPUT, m.NEEDS_HUMAN, m.FAILED, m.DRY_RUN_DONE}
+    chosen = [s for s in statuses.split(",") if s in allowed]
+    conn = db.connect()
+    changed = conn.execute(
+        f"UPDATE jobs SET status = ?, reason = 'requeued' WHERE ats = ? AND status IN ({','.join('?' * len(chosen))})",
+        (m.QUEUED, ats, *chosen),
+    ).rowcount
+    typer.echo(f"requeued={changed}")
 
 
 @app.command("bank-revoke")
