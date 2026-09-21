@@ -62,7 +62,7 @@ def parse(data: dict) -> tuple[list[Question], dict]:
     demo = data.get("demographic_questions") or {}
     for item in demo.get("questions") or []:
         questions.append(
-            Question(id=f"demographic_{item['id']}", label=html.unescape(item.get("label") or "").strip(),
+            Question(id=str(item["id"]), label=html.unescape(item.get("label") or "").strip(),  # DOM id is the bare number
                      type="multiselect" if item.get("type") == "multi_value_multi_select" else "select",
                      required=bool(item.get("required")), section="demographic",
                      options=[html.unescape(o.get("label", "")).strip() for o in item.get("answer_options") or []])
@@ -94,7 +94,7 @@ def preset_answers(questions: list[Question], facts, resume_path: str) -> dict[s
 # value, so every choice is click → filter → click the [role=option] → read the committed value back.
 
 # Fixed-id fields the public API does not report (country + the education block).
-DOM_TEXT_PRESETS = {"end-year--0": "grad_year"}
+DOM_TEXT_PRESETS = {"end-year--0": "grad_year", "start-year--0": "school_start_year"}
 DOM_TYPEAHEAD_PRESETS = {"school--0": "school"}  # async search over thousands of schools
 
 
@@ -135,9 +135,29 @@ def choose(page, field_id: str, option: str, typeahead: bool = False) -> None:
     box.fill(option if typeahead else option[:30])  # filters the list; does NOT commit a value
     target = page.locator(MENU_OPTION).filter(has_text=re.compile(rf"^\s*{re.escape(option)}\s*$"))
     target.first.wait_for(state="visible", timeout=10_000)
+    option_flag = _flag_iso(target.first)
     target.first.click()
-    if _committed(page, field_id) != option:
-        raise FillError(f"{field_id}: chose {option!r} but the form holds {_committed(page, field_id)!r}")
+    held = _committed(page, field_id)
+    if held == option:
+        return
+    # The phone-country picker lists "Canada +1" but displays a flag plus "+1" once chosen. "+1" alone is also
+    # the US, so the committed FLAG must be the chosen option's flag — a bare text suffix is not accepted.
+    held_flag = _flag_iso(_control(page, field_id).locator(".select__single-value").first)
+    if option_flag and held_flag == option_flag and held and option.endswith(held):
+        FLAG_VERIFIED[field_id] = held
+        return
+    raise FillError(f"{field_id}: chose {option!r} but the form holds {held!r} (flag {held_flag or 'none'})")
+
+
+FLAG_VERIFIED: dict[str, str] = {}  # field id → committed text that was verified through its flag, for readback
+
+
+def _flag_iso(scope) -> str:
+    flag = scope.locator(".iti__flag")
+    if not flag.count():
+        return ""
+    found = re.search(r"iti__([a-z]{2})\b", flag.first.get_attribute("class") or "")
+    return found.group(1) if found else ""
 
 
 LOCATION_FIELD = "candidate-location"  # "Location (City)": a geocoder typeahead that also fills hidden lat/long
@@ -216,6 +236,7 @@ def fill(page, questions: list[Question], answers: dict[str, object], facts) -> 
     Runs in passes because Greenhouse reveals conditional fields (e.g. Race appears only after the
     Hispanic/Latino answer). Answers for fields that never appear are reported, not forced.
     """
+    FLAG_VERIFIED.clear()  # per-form state
     dom = {f["id"]: f for f in dom_census(page)}
     for field_id, fact in DOM_TEXT_PRESETS.items():
         if field_id in dom:
@@ -273,6 +294,7 @@ def readback(page, answers: dict[str, object]) -> dict:
     mismatches = {
         k: {"wanted": v, "held": held.get(k)} for k, v in answers.items()
         if k in held and isinstance(v, str) and not v.lower().endswith((".pdf", ".docx", ".doc")) and held[k] != v
+        and not (k in FLAG_VERIFIED and held[k] == FLAG_VERIFIED[k])  # verified by flag at selection time
     }  # fmt: skip
     # a required checkbox group is satisfied when any box in it is ticked
     groups = {i.split("[]")[0] for i in empty_required if "[]" in i}

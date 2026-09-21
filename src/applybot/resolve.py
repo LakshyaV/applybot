@@ -245,6 +245,7 @@ class Facts:
             "grad_date": f"{month} {end[:4]}" if end else None,
             "school_start": edu.get("start"), "currently_enrolled": edu.get("currently_enrolled"),
             "school_start_year": (edu.get("start") or "")[:4] or None,
+            "school_start_month": MONTH_NAMES[int(edu["start"][5:7]) - 1] if edu.get("start") else None,
             "coop_program": edu.get("coop_program"),
             "class_standing": edu.get("class_standing_fall_2026"),
             "high_school_grad_year": edu.get("high_school_grad_year"),
