@@ -307,7 +307,8 @@ def resolve_trackers(jobs: list[m.Job], max_workers: int = 4) -> int:
 # --- entry point -------------------------------------------------------------------------------
 
 
-def ingest(url: str, target_season: str) -> tuple[list[m.Job], str]:
+def ingest(url: str, target_season: str, known_raw_urls: frozenset[str] = frozenset()) -> tuple[list[m.Job], str]:
+    """known_raw_urls: tracker links already in the tracker — skipped so re-ingests do not re-resolve them."""
     owner, repo = parse_repo_url(url)
     info = repo_info(owner, repo)
     full_name, branch = info["full_name"], info["default_branch"]
@@ -330,5 +331,6 @@ def ingest(url: str, target_season: str) -> tuple[list[m.Job], str]:
     for path in paths:
         if "/" not in path and path.lower().endswith(".md") and not SKIP_MD.search(path):
             jobs += from_tables(fetch_raw(full_name, branch, path), source, target_season)
+    jobs = [job for job in jobs if not (is_tracker(job.url) and job.raw_url in known_raw_urls)]
     resolve_trackers(jobs)
     return jobs, "tables"

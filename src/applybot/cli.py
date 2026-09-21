@@ -16,15 +16,24 @@ app = typer.Typer(no_args_is_help=True, add_completion=False, help="Internship d
 
 
 def _apply_company_cap(conn, cap: int | None) -> int:
-    """Keep only the `cap` best-ranked queued roles per company; the rest wait as 'discovered'."""
+    """Keep only the `cap` best-ranked roles per company; the rest wait as 'discovered'.
+
+    Roles already applied to (or mid-flight) at that company use up the cap too.
+    """
     if not cap:
         return 0
+    used = (m.IN_PROGRESS, m.NEEDS_ANSWERS, m.NEEDS_INPUT, m.SUBMITTING, m.VERIFY, m.SUBMITTED, m.ALREADY_APPLIED)
     return conn.execute(
-        """UPDATE jobs SET status = ?, reason = 'over per_company_cap' WHERE id IN (
-             SELECT id FROM (SELECT id, ROW_NUMBER() OVER (
-                 PARTITION BY lower(company) ORDER BY priority, date_posted DESC, id) AS rank
-               FROM jobs WHERE status = ?) WHERE rank > ?)""",
-        (m.DISCOVERED, m.QUEUED, cap),
+        f"""UPDATE jobs SET status = ?, reason = 'over per_company_cap' WHERE id IN (
+             SELECT id FROM (
+               SELECT j.id,
+                      ROW_NUMBER() OVER (PARTITION BY lower(j.company)
+                                         ORDER BY j.priority, j.date_posted DESC, j.id) AS rank,
+                      (SELECT COUNT(*) FROM jobs u WHERE lower(u.company) = lower(j.company)
+                          AND u.status IN ({",".join("?" * len(used))})) AS used
+               FROM jobs j WHERE j.status = ?)
+             WHERE rank + used > ?)""",
+        (m.DISCOVERED, *used, m.QUEUED, cap),
     ).rowcount
 
 
@@ -36,8 +45,9 @@ def ingest_repo(
 ):
     """Scrape every job in a GitHub internship-list repo into the tracker (idempotent)."""
     cfg = load_config()
-    jobs, adapter = github_repo.ingest(url, cfg["target"]["season"])
     conn = db.connect()
+    known = frozenset(r[0] for r in conn.execute("SELECT raw_url FROM jobs WHERE raw_url != url"))
+    jobs, adapter = github_repo.ingest(url, cfg["target"]["season"], known)
     outcomes, queued_by_ats, reasons = Counter(), Counter(), Counter()
     for job in jobs:
         status, reason = filters.eligibility(job, cfg)

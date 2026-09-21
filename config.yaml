@@ -38,7 +38,7 @@ eligibility:
   no_sponsorship_penalty: 5
 
 # null = no cap ("apply to every position"). A number keeps the N best-ranked roles per company.
-per_company_cap: null
+per_company_cap: 10   # chosen by user 2026-09-20
 
 # user      : every new high-stakes question mapping is approved by the human once
 # dual_pass : two independent LLM passes + deterministic polarity check must agree
