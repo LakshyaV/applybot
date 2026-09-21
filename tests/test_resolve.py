@@ -299,3 +299,29 @@ def test_per_job_essays_are_requested_only_when_required(conn):
     assert [q.id for q in out.essays] == ["w1"] and out.answers == {}
     # once an essay has been written for this job it arrives as a preset answer and the form is ready
     assert resolve(conn, [required, optional], PROFILE, US, preset={"w1": "Because …"}).ready
+
+
+# --- a human-only question can be automated only as a cleared, user-directed, employer-scoped exception ---------
+
+
+def test_human_only_override_requires_flag_clearance_and_named_employer(conn):
+    policy = Question("w", "{company} prohibits the use of unauthorized outside assistance during the interview process, "
+                           "including artificial intelligence (AI) tools. By submitting you acknowledge these guidelines.",
+                      "select", True, ["I acknowledge the above policies"], company="Waymo")  # fmt: skip
+    mapping = {"kind": "fact_option", "fact": "interview_policy_acknowledged",
+               "options": {"I acknowledge the above policies": True}}  # fmt: skip
+    assert validate_resolution(policy, mapping)  # without the explicit flag it is rejected outright
+    flagged = {**mapping, "user_override": True}
+    assert not validate_resolution(policy, flagged)
+
+    profile = copy.deepcopy(PROFILE)
+    profile["consents"]["interview_policy_ack_companies"] = ["Waymo"]
+    waymo, other = JobContext("Waymo", ["US"]), JobContext("Cruise", ["US"])
+
+    bank_put(conn, policy, flagged, "user", approved=False)
+    assert resolve(conn, [policy], profile, waymo).human  # flagged but not yet cleared → still the human's
+    bank_put(conn, policy, flagged, "user", approved=True)
+    assert resolve(conn, [policy], profile, waymo).answers == {"w": "I acknowledge the above policies"}
+    out = resolve(conn, [policy], profile, other)  # same wording at another employer: never auto-acknowledged
+    assert out.answers == {} and out.needs_input
+    assert resolve(conn, [policy], PROFILE, waymo).needs_input  # and not without the user's consent in the profile

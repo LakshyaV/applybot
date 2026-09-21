@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import signal
 import time
 from datetime import date
 from collections import Counter
@@ -333,6 +334,9 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict
         result = rs.resolve(conn, questions, profile, ctx, preset)
         for q in result.misses:
             rs.record_miss(conn, q, job_id)
+        for q, why in result.human:  # visible in `questions`, so a user-directed exception has something to attach to
+            if why == "human-only question":
+                rs.record_miss(conn, q, job_id, needs="human")
         limits = {f["id"]: f.get("maxlength") for f in greenhouse.dom_census(page)}
         for q in result.essays:  # ask for exactly the essays this form requires, with the field's size limit
             conn.execute("INSERT OR IGNORE INTO essays (job_id, question_id, label, created_at) VALUES (?,?,?,?)",
@@ -471,11 +475,16 @@ def run(
                 outcome = _process(conn, profile, cfg, context, row, submit)
                 tally[outcome["status"]] += 1
                 typer.echo(json.dumps(outcome, ensure_ascii=False))
-                if submit and outcome["status"] == m.SUBMITTED:
-                    time.sleep(cfg["pacing"]["submit_min_interval_seconds"])
+                if submit and outcome["status"] == m.SUBMITTED and row is not claimed[-1]:
+                    time.sleep(cfg["pacing"]["submit_min_interval_seconds"])  # pace between submits, not after the last
         finally:
+            # Report first, then shut the browser down with a deadline: Chrome sometimes never finishes closing, and a
+            # process that hangs here once blocked the whole session for half an hour after its work was done.
+            typer.echo(json.dumps({"mode": mode, "summary": dict(tally)}))
+            signal.signal(signal.SIGALRM, lambda *_: os._exit(0))
+            signal.alarm(25)  # covers context.close() AND Playwright's own shutdown when the `with` block exits
             context.close()
-    typer.echo(json.dumps({"mode": mode, "summary": dict(tally)}))
+    signal.alarm(0)
 
 
 @app.command()

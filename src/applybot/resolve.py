@@ -255,6 +255,10 @@ class Facts:
             "can_perform_essential_functions": avail.get("can_perform_essential_functions"),
             "french_proficient": p["identity"].get("french_proficient"),
             "attends_university_in_canada": ("canada" in (edu.get("location") or "").lower()) if edu.get("location") else None,
+            # The user's promise to follow an employer's interview-conduct policy (e.g. no unauthorized AI help in
+            # interviews) — given for NAMED employers only.
+            "interview_policy_acknowledged": True if company and any(
+                normalize(c) in company for c in p["consents"].get("interview_policy_ack_companies", [])) else None,
             # A consent the user gave for NAMED employers only (investigation authorization + liability release):
             # elsewhere the same wording still pauses for the user.
             "investigation_release_signature": ident["full_name"] if company and any(
@@ -337,7 +341,9 @@ def validate_resolution(question: Question, res: dict) -> list[str]:
     if kind not in KINDS:
         return [f"kind must be one of {sorted(KINDS)}"]
     options = {normalize(o): o for o in question.options}
-    if HUMAN_ONLY_RE.search(question.label) and kind != "human":
+    # A human-only question can be automated ONLY as an explicit, user-directed exception: the resolution must say
+    # so ("user_override"), it still needs the user's clearance, and its fact should be scoped to named employers.
+    if HUMAN_ONLY_RE.search(question.label) and kind != "human" and res.get("user_override") is not True:
         errors.append("this question is human-only (ID numbers / AI-use attestations / arbitration)")
     if kind in ("fact_text", "fact_option", "fact_checkbox") and res.get("fact") not in fact_keys():
         errors.append(f"unknown fact {res.get('fact')!r}")
@@ -453,9 +459,12 @@ def resolve(conn: sqlite3.Connection, questions: list[Question], profile: dict, 
         if q.id in out.answers:
             continue
         if HUMAN_ONLY_RE.search(q.label):
-            if q.required:
-                out.human.append((q, "human-only question"))
-            continue
+            override = bank_get(conn, q)
+            # only a CLEARED, explicitly user-directed entry may answer a human-only question
+            if not (override and override[1] and override[0].get("user_override") is True):
+                if q.required:
+                    out.human.append((q, "human-only question"))
+                continue
         if is_eeo(q) and all(profile["eeo"].get(k, DECLINE) == DECLINE for k in EEO_KEYS):
             option = eeo_decline_option(q)
             if option:
