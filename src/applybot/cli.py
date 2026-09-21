@@ -320,9 +320,8 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict
 
     page = context.new_page()
     try:
-        page.goto(meta["url"] or row["url"], wait_until="networkidle", timeout=60_000)
-        if not page.locator("form #first_name").count():
-            return finish(m.NEEDS_HUMAN, "not the standard Greenhouse form layout (embedded/legacy board)")
+        if not greenhouse.open_form(page, row["board"], row["ats_job_id"]):
+            return finish(m.NEEDS_HUMAN, "could not reach a standard Greenhouse form (hosted page and embed address both failed)")
         questions += greenhouse.dom_only_questions(page, questions, row["company"])
         preset = greenhouse.preset_answers(questions, facts, str(ROOT / profile["resume_path"]))
         on_form = {q.id for q in questions}

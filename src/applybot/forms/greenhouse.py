@@ -90,6 +90,23 @@ def preset_answers(questions: list[Question], facts, resume_path: str) -> dict[s
 
 
 # --- browser side ------------------------------------------------------------------------------
+
+
+def open_form(page, board: str, job_id: str) -> bool:
+    """Land on Greenhouse's own application form. Many employers (Waymo, Epic Games…) redirect the hosted job
+    page to their careers site, where the form sits in an iframe or not at all — the embed address always serves
+    the same form. Wait for the FORM, not for the network to go quiet: heavy company pages never go quiet."""
+    for url in (f"https://job-boards.greenhouse.io/{board}/jobs/{job_id}",
+                f"https://job-boards.greenhouse.io/embed/job_app?for={board}&token={job_id}"):  # fmt: skip
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+            page.locator("form #first_name").wait_for(state="visible", timeout=15_000)
+            page.wait_for_timeout(1_500)  # let lazy sections (education block, custom questions) mount
+            return True
+        except Exception:  # noqa: BLE001 — try the next address
+            continue
+    return False
+
 # DOM ids equal the API field names. Selects are react-select comboboxes: fill() alone never commits a
 # value, so every choice is click → filter → click the [role=option] → read the committed value back.
 

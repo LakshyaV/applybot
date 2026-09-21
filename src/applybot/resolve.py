@@ -249,6 +249,16 @@ class Facts:
             "coop_program": edu.get("coop_program"),
             "class_standing": edu.get("class_standing_fall_2026"),
             "high_school_grad_year": edu.get("high_school_grad_year"),
+            "visa_type_needed": auth["by_country"].get("US", {}).get("visa_type_needed"),
+            "export_license_required": auth["by_country"].get("US", {}).get("export_license_required"),
+            "may_contact_current_employer": p["consents"].get("may_contact_current_employer"),
+            "can_perform_essential_functions": avail.get("can_perform_essential_functions"),
+            "french_proficient": p["identity"].get("french_proficient"),
+            "attends_university_in_canada": ("canada" in (edu.get("location") or "").lower()) if edu.get("location") else None,
+            # A consent the user gave for NAMED employers only (investigation authorization + liability release):
+            # elsewhere the same wording still pauses for the user.
+            "investigation_release_signature": ident["full_name"] if company and any(
+                normalize(c) in company for c in p["consents"].get("investigation_release_companies", [])) else None,
             "conflict_of_interest_any": hist.get("conflict_of_interest_any"),
             "government_official_ties": hist.get("government_official_ties"),
             "pending_criminal_charges": hist.get("pending_criminal_charges"),
