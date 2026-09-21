@@ -205,8 +205,11 @@ def dom_only_questions(page, api_questions: list[Question], company: str) -> lis
     extra = []
     for f in dom_census(page):
         base = f["id"].split("[]")[0]
-        if f["id"] in known or base in known or f["kind"] in ("file", "checkbox"):
+        if f["id"] in known or base in known or f["kind"] == "file":
             continue
+        if f["kind"] == "checkbox" and ("[]" in f["id"] or not f["required"]):
+            continue  # option groups belong to an API question; optional lone boxes (newsletters…) stay unticked
+        # a REQUIRED lone checkbox is a consent/attestation the API schema never mentions → it must be a question
         if f["id"] in DOM_TYPEAHEAD_PRESETS or f["id"] in DOM_TEXT_PRESETS or f["id"] == LOCATION_FIELD:
             continue  # answered from the profile by fixed id
         options = read_options(page, f["id"]) if f["kind"] == "select" else []

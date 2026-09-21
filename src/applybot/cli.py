@@ -408,7 +408,7 @@ def code(job_id: int, value: str):
 
 
 @app.command()
-def run(limit: int = 5, headless: bool = False):
+def run(limit: int = 5, headless: bool = False, jobs: str = typer.Option("", help="Comma-separated job ids to run instead of the queue head")):
     """Work the Greenhouse queue. Whether anything is SUBMITTED is decided only by `mode` in config.yaml,
     which the user controls: dry_run (default) never submits."""
     from playwright.sync_api import sync_playwright
@@ -441,7 +441,17 @@ def run(limit: int = 5, headless: bool = False):
     with sync_playwright() as pw:
         context = browser.launch(pw, headless=headless)
         try:
-            for row in db.claim(conn, limit, f"run-{os.getpid()}", ["greenhouse"]):
+            if jobs:  # specific jobs: only ones that are queued (never submitted / mid-submit / awaiting verify)
+                ids = [int(j) for j in jobs.split(",") if j.strip().isdigit()][:limit]
+                marks = ",".join("?" * len(ids))
+                claimed = conn.execute(
+                    f"UPDATE jobs SET status = ?, lease_until = ?, claimed_by = ? WHERE id IN ({marks}) AND status = ? "
+                    "AND ats = 'greenhouse' RETURNING *",
+                    (m.IN_PROGRESS, int(time.time()) + db.LEASE_SECONDS, f"run-{os.getpid()}", *ids, m.QUEUED),
+                ).fetchall()
+            else:
+                claimed = db.claim(conn, limit, f"run-{os.getpid()}", ["greenhouse"])
+            for row in claimed:
                 outcome = _process(conn, profile, cfg, context, row, submit)
                 tally[outcome["status"]] += 1
                 typer.echo(json.dumps(outcome, ensure_ascii=False))
