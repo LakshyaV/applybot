@@ -8,7 +8,7 @@ import typer
 
 from . import db, filters, preflight, resolve as rs
 from . import models as m
-from .config import DATA_DIR, load_config, load_profile
+from .config import DATA_DIR, ROOT, load_config, load_profile
 from .forms import greenhouse
 from .normalize import is_tracker
 from .sources import github_repo
@@ -152,6 +152,8 @@ def survey(ats: str = "greenhouse", limit: int = 50):
             except httpx.HTTPError as err:
                 tally[f"error {type(err).__name__}"] += 1
                 continue
+            for q in questions:
+                q.company = row["company"]
             countries = meta["countries"] if meta["countries"] != ["UNKNOWN"] else json.loads(row["countries"])
             conn.execute("UPDATE jobs SET countries = ? WHERE id = ?", (json.dumps(countries), row["id"]))
             blocked, reason = preflight.check(meta["description"], countries)
@@ -169,9 +171,10 @@ def survey(ats: str = "greenhouse", limit: int = 50):
             for q in result.misses:
                 rs.record_miss(conn, q, row["id"])
             tally["ready" if result.ready else "blocked_on_answers"] += 1
-    pending = conn.execute("SELECT COUNT(*), SUM(high_stakes) FROM questions").fetchone()
     typer.echo(f"surveyed={len(rows)}  " + "  ".join(f"{k}={v}" for k, v in tally.most_common()))
-    typer.echo(f"distinct unanswered questions: {pending[0]} (high-stakes: {pending[1] or 0})")
+    by_tier = dict(conn.execute("SELECT high_stakes, COUNT(*) FROM questions GROUP BY high_stakes").fetchall())
+    typer.echo(f"distinct unanswered questions: {sum(by_tier.values())}  (critical → you: {by_tier.get(2, 0)}, "
+               f"verify: {by_tier.get(1, 0)}, low: {by_tier.get(0, 0)})")
 
 
 @app.command()
@@ -181,12 +184,12 @@ def questions(limit: int = 20, as_json: bool = typer.Option(False, "--json"), hi
     clause = "" if high_stakes is None else f"WHERE high_stakes = {int(high_stakes)}"
     rows = conn.execute(f"SELECT * FROM questions {clause} ORDER BY job_count DESC, qhash LIMIT ?", (limit,)).fetchall()
     for r in rows:
-        item = {"qhash": r["qhash"], "jobs": r["job_count"], "high_stakes": bool(r["high_stakes"]), "type": r["field_type"],
+        item = {"qhash": r["qhash"], "jobs": r["job_count"], "tier": ["low", "verify", "critical"][r["high_stakes"]], "type": r["field_type"],
                 "label": r["label"], "options": json.loads(r["options"])}  # fmt: skip
         if as_json:
             typer.echo(json.dumps(item, ensure_ascii=False))
         else:
-            flag = "!" if item["high_stakes"] else " "
+            flag = {"low": " ", "verify": "?", "critical": "!"}[item["tier"]]
             opts = f"  {item['options'][:6]}" if item["options"] else ""
             typer.echo(f"{item['qhash']} x{item['jobs']:<3}{flag} [{item['type']}] {item['label'][:110]}{opts}")
 
@@ -214,18 +217,79 @@ def answers_import(path: str, origin: str = "llm"):
 
 
 @app.command()
-def approvals(approve: list[str] = typer.Option([], help="qhash to approve (repeatable)"), as_json: bool = typer.Option(False, "--json")):
-    """High-stakes bank entries awaiting the USER's approval, phrased as the claim the form will make."""
+def approvals(
+    approve: list[str] = typer.Option([], help="qhash to clear (repeatable)"),
+    tier: str = typer.Option("critical", help="critical = cleared by the USER only · verify = cleared by the verifier pass"),
+    as_json: bool = typer.Option(False, "--json"),
+):
+    """Bank entries awaiting clearance, phrased as the claim the form will make on the user's behalf."""
+    level = {"critical": rs.CRITICAL, "verify": rs.VERIFY}[tier]
     conn = db.connect()
     for qhash in approve:
-        conn.execute("UPDATE answer_bank SET approved = 1, origin = origin || '+user' WHERE qhash = ?", (qhash,))
-    rows = conn.execute("SELECT * FROM answer_bank WHERE high_stakes = 1 AND approved = 0 ORDER BY created_at").fetchall()
+        conn.execute("UPDATE answer_bank SET approved = 1, origin = origin || ? WHERE qhash = ? AND high_stakes = ?",
+                     (f"+{tier}", qhash, level))  # fmt: skip
+    rows = conn.execute("SELECT * FROM answer_bank WHERE high_stakes = ? AND approved = 0 ORDER BY created_at", (level,)).fetchall()
     for r in rows:
         q = rs.Question("", r["label"], r["field_type"], True, json.loads(r["options"]))
         sentence = rs.assertion_sentence(q, json.loads(r["resolution"]))
         typer.echo(json.dumps({"qhash": r["qhash"], "claim": sentence}, ensure_ascii=False) if as_json else f"{r['qhash']}  {sentence}")
     if not rows:
-        typer.echo("nothing awaiting approval")
+        typer.echo("nothing awaiting clearance")
+
+
+@app.command("dry-run")
+def dry_run(job_id: int, headless: bool = False):
+    """Fill ONE Greenhouse application and screenshot it for review. This command has no submit step."""
+    from playwright.sync_api import sync_playwright
+
+    from . import browser
+
+    conn, profile = db.connect(), load_profile()
+    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if row is None or row["ats"] != "greenhouse":
+        raise typer.BadParameter("dry-run currently supports jobs whose ats is 'greenhouse'")
+    questions, meta = greenhouse.parse(greenhouse.fetch(row["board"], row["ats_job_id"]))
+    countries = meta["countries"] if meta["countries"] != ["UNKNOWN"] else json.loads(row["countries"])
+    blocked, reason = preflight.check(meta["description"], countries)
+    if blocked:
+        db.set_status(conn, job_id, blocked, reason)
+        typer.echo(json.dumps({"job": job_id, "status": blocked, "reason": reason}))
+        return
+    ctx = rs.JobContext(row["company"], countries)
+    facts = rs.Facts(profile, ctx)
+    run_dir = DATA_DIR / "runs" / str(job_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as pw:
+        context = browser.launch(pw, headless=headless)
+        page = context.new_page()
+        try:
+            page.goto(meta["url"] or row["url"], wait_until="networkidle", timeout=60_000)
+            for q in questions:
+                q.company = row["company"]
+            questions += greenhouse.dom_only_questions(page, questions, row["company"])
+            preset = greenhouse.preset_answers(questions, facts, str(ROOT / profile["resume_path"]))
+            result = rs.resolve(conn, questions, profile, ctx, preset)
+            for q in result.misses:
+                rs.record_miss(conn, q, job_id)
+            report = greenhouse.fill(page, questions, dict(result.answers), facts)
+            page.screenshot(path=str(run_dir / "filled.png"), full_page=True)
+        finally:
+            context.close()
+
+    (run_dir / "answers.json").write_text(json.dumps(result.answers, indent=1, ensure_ascii=False, default=str))
+    (run_dir / "report.json").write_text(json.dumps(report, indent=1, ensure_ascii=False, default=str))
+    label = {q.id: q.label for q in questions}
+    typer.echo(json.dumps({
+        "job": job_id, "company": row["company"], "title": row["title"], "country": ctx.country,
+        "filled": len(result.answers), "awaiting_answer_bank": [q.label[:70] for q in result.misses],
+        "needs_your_input": [f"{q.label[:50]} (missing: {fact})" for q, fact in result.needs_input],
+        "human_only": [q.label[:60] for q, _ in result.human], "essays": [q.label[:60] for q in result.essays],
+        "readback_mismatches": report["mismatches"],
+        "required_still_empty": [label.get(i, i)[:60] for i in report["empty_required"]],
+        "would_be_submittable": result.ready and not report["mismatches"] and not report["empty_required"],
+        "screenshot": str(run_dir / "filled.png"),
+    }, indent=1, ensure_ascii=False))
 
 
 @app.command()

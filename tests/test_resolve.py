@@ -8,8 +8,8 @@ import pytest
 from applybot import db
 from applybot.config import load_profile
 from applybot.resolve import (
-    JobContext, Question, assertion_sentence, bank_put, fact_keys, is_high_stakes, record_miss, resolve,
-    validate_resolution,
+    CRITICAL, LOW, VERIFY, JobContext, Question, assertion_sentence, bank_put, fact_keys, is_high_stakes,
+    record_miss, resolve, templated, tier, validate_resolution,
 )  # fmt: skip
 
 PROFILE = load_profile(Path(__file__).parent / "fixtures" / "profile.md")
@@ -134,10 +134,51 @@ def test_validation_rejects_unsafe_proposals():
                                              "options": {"Yes": True, "No": False}})  # fmt: skip
 
 
-def test_eeo_declines_with_the_forms_own_wording(conn):
-    gender = Question("e", "Gender", "select", False, ["Male", "Female", "Decline To Self Identify"], section="eeo")
-    bank_put(conn, gender, {"kind": "decline", "option": "Decline To Self Identify"}, "user", approved=True)
-    assert resolve(conn, [gender], PROFILE, US).answers == {"e": "Decline To Self Identify"}
+def test_eeo_auto_declines_with_the_forms_own_wording_and_no_bank_entry(conn):
+    forms = [
+        Question("e1", "Gender", "select", False, ["Male", "Female", "Decline To Self Identify"], section="eeo"),
+        Question("e2", "VeteranStatus", "select", False, ["I don't wish to answer", "I am not a protected veteran"], section="eeo"),
+        Question("e3", "Please select your gender", "select", True, ["Male", "Female", "Prefer not to say"]),
+        Question("e4", "DisabilityStatus", "select", False, ["I do not want to answer", "No, I do not have a disability"], section="eeo"),
+    ]  # fmt: skip
+    out = resolve(conn, forms, PROFILE, US)
+    assert out.ready and out.answers == {"e1": "Decline To Self Identify", "e2": "I don't wish to answer",
+                                         "e3": "Prefer not to say", "e4": "I do not want to answer"}  # fmt: skip
+
+
+def test_eeo_without_a_decline_option_is_blank_if_voluntary_and_never_guessed_if_required(conn):
+    voluntary = Question("v", "Are you Hispanic or Latinx?", "select", False, ["Yes", "No"])
+    required = Question("r", "Are you a protected veteran?", "select", True, ["Yes", "No"])
+    out = resolve(conn, [voluntary, required], PROFILE, US)
+    assert out.answers == {} and out.misses == [required]
+
+
+def test_eeo_policy_is_not_applied_once_the_user_fills_in_real_answers(conn):
+    filled = copy.deepcopy(PROFILE)
+    filled["eeo"]["gender"] = "Female"
+    gender = Question("e", "Gender", "select", True, ["Male", "Female", "Decline To Self Identify"], section="eeo")
+    assert resolve(conn, [gender], filled, US).misses == [gender]  # goes through the bank, not the auto-decline
+
+
+def test_company_templating_shares_one_reviewed_entry_across_employers(conn):
+    gallup = Question("a", "Will you now or in the future require Gallup to provide work visa sponsorship?", "select",
+                      True, ["Yes", "No"], company="Gallup")  # fmt: skip
+    stripe = Question("b", "Will you now or in the future require Stripe to provide work visa sponsorship?", "select",
+                      True, ["Yes", "No"], company="Stripe, Inc.")  # fmt: skip
+    assert gallup.qhash == stripe.qhash and "{company}" in gallup.template
+    bank_put(conn, gallup, {"kind": "fact_option", "fact": "requires_sponsorship",
+                            "options": {"Yes": True, "No": False}}, "user", approved=True)  # fmt: skip
+    assert resolve(conn, [stripe], PROFILE, US).answers == {"b": "Yes"}
+    assert templated("Why Stripe?", "Stripe") == "Why {company}?"
+    assert templated("Describe your stripes", "Stripe") == "Describe your stripes"  # whole-word only
+
+
+def test_tiers():
+    assert tier(SPONSOR) == CRITICAL and tier(AUTHORIZED) == CRITICAL
+    assert tier(Question("x", "I certify the above is true", "checkbox")) == CRITICAL
+    assert tier(Question("x", "Have you ever worked for {company} as an employee?", "select")) == VERIFY
+    assert tier(Question("x", "What is your GPA?", "text")) == VERIFY
+    assert tier(LINKEDIN) == LOW
 
 
 def test_previous_employer_is_computed_per_company(conn):
@@ -163,7 +204,7 @@ def test_misses_are_deduped_across_jobs(conn):
     for job_id in (1, 2, 3):
         record_miss(conn, SPONSOR, job_id)
     row = conn.execute("SELECT job_count, high_stakes FROM questions").fetchone()
-    assert (row["job_count"], row["high_stakes"]) == (3, 1)
+    assert (row["job_count"], row["high_stakes"]) == (3, CRITICAL)
     assert conn.execute("SELECT COUNT(*) FROM job_questions").fetchone()[0] == 3
 
 

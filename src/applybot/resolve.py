@@ -29,16 +29,33 @@ class Question:
     required: bool = False
     options: list[str] = field(default_factory=list)
     section: str = ""  # "", "eeo", "demographic"
+    company: str = ""  # only used to template the employer's name out of the label before hashing
+
+    @property
+    def template(self) -> str:
+        return templated(self.label, self.company)
 
     @property
     def qhash(self) -> str:
-        return question_hash(self.label, self.type, self.options)
+        return question_hash(self.template, self.type, self.options)
 
 
 def normalize(text: str) -> str:
     text = re.sub(r"<[^>]+>", " ", text or "").lower().replace("’", "'")
     text = re.sub(r"[\s ]+", " ", text)
     return text.strip(" *:\t\n")
+
+
+CORPORATE_SUFFIX_RE = re.compile(r",?\s+(inc|llc|ltd|corp|corporation|co|company|technologies|labs|group|holdings)\.?$", re.I)
+
+
+def templated(label: str, company: str) -> str:
+    """Replace the employer's own name with {company} so one reviewed entry serves every employer that
+    uses the same ATS template. Deterministic string substitution — not similarity matching."""
+    names = {company.strip(), CORPORATE_SUFFIX_RE.sub("", company.strip())}
+    for name in sorted((n for n in names if len(n) >= 3), key=len, reverse=True):
+        label = re.sub(rf"(?<![A-Za-z0-9]){re.escape(name)}(?![A-Za-z0-9])", "{company}", label, flags=re.I)
+    return label
 
 
 def question_hash(label: str, field_type: str, options: list[str]) -> str:
@@ -69,8 +86,49 @@ HUMAN_ONLY_RE = re.compile(
 )
 
 
+# Critical: a wrong answer is a false legal statement. Cleared only by the USER, once per template.
+CRITICAL_RE = re.compile(
+    r"sponsor|visa|authoriz|authoris|eligible to work|right to work|work permit|citizen|national(ity)?\b|"
+    r"permanent resident|u\.?s\.? person|itar|export control|clearance|convict|criminal|felony|misdemeanor|"
+    r"background check|non-?compete|restrictive covenant|arbitrat|certif|attest|acknowledg|i agree|"
+    r"i understand|consent|government|public official|conflict of interest",
+    re.I,
+)
+EEO_RE = re.compile(
+    r"gender|\bsex\b|race|ethnic|hispanic|latin[oax]|veteran|disabilit|lgbt|sexual orientation|transgender", re.I
+)
+# The user's standing policy is "decline": choose the form's own decline option, matched exactly against this list.
+DECLINE_PHRASES = {
+    "decline to self identify", "decline to self-identify", "i decline to self identify", "i decline to self-identify",
+    "i don't wish to answer", "i do not wish to answer", "i do not want to answer", "i don't want to answer",
+    "prefer not to say", "i prefer not to say", "prefer not to answer", "i prefer not to answer",
+    "prefer not to disclose", "i prefer not to disclose", "choose not to disclose", "i choose not to disclose",
+    "decline to answer", "decline to state", "i do not wish to self-identify", "i do not wish to disclose",
+    "i do not wish to provide this information", "do not wish to answer", "not declared", "prefer not to respond",
+}  # fmt: skip
+LOW, VERIFY, CRITICAL = 0, 1, 2
+
+
+def is_eeo(question: Question) -> bool:
+    return question.section in ("eeo", "demographic") or bool(EEO_RE.search(question.label))
+
+
+def tier(question: Question) -> int:
+    """CRITICAL → user approval · VERIFY → independent truth-verifier pass · LOW → validated proposal."""
+    if CRITICAL_RE.search(question.label):
+        return CRITICAL
+    if HIGH_STAKES_RE.search(question.label) or is_eeo(question):
+        return VERIFY
+    return LOW
+
+
 def is_high_stakes(question: Question) -> bool:
-    return bool(HIGH_STAKES_RE.search(question.label) or question.section in ("eeo", "demographic"))
+    return tier(question) > LOW
+
+
+def eeo_decline_option(question: Question) -> str | None:
+    matches = [o for o in question.options if normalize(o).rstrip(".") in DECLINE_PHRASES]
+    return matches[0] if len(matches) == 1 else None
 
 
 # --- facts -------------------------------------------------------------------------------------
@@ -268,7 +326,7 @@ def bank_put(conn: sqlite3.Connection, question: Question, res: dict, origin: st
     conn.execute(
         "INSERT OR REPLACE INTO answer_bank (qhash, label, field_type, options, high_stakes, resolution, approved,"
         " origin, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-        (question.qhash, question.label, question.type, json.dumps(question.options), int(is_high_stakes(question)),
+        (question.qhash, question.template, question.type, json.dumps(question.options), tier(question),
          json.dumps(res), int(approved), origin, int(time.time())),
     )  # fmt: skip
     conn.execute("DELETE FROM questions WHERE qhash = ?", (question.qhash,))
@@ -283,7 +341,7 @@ def record_miss(conn: sqlite3.Connection, question: Question, job_id: int, needs
     conn.execute(
         "INSERT INTO questions (qhash, label, field_type, options, high_stakes, needs, example_job_id, created_at)"
         " VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(qhash) DO UPDATE SET job_count = job_count + 1",
-        (question.qhash, question.label, question.type, json.dumps(question.options), int(is_high_stakes(question)),
+        (question.qhash, question.template, question.type, json.dumps(question.options), tier(question),
          needs, job_id, int(time.time())),
     )  # fmt: skip
     conn.execute("INSERT OR IGNORE INTO job_questions (job_id, qhash) VALUES (?, ?)", (job_id, question.qhash))
@@ -317,6 +375,13 @@ def resolve(conn: sqlite3.Connection, questions: list[Question], profile: dict, 
             if q.required:
                 out.human.append((q, "human-only question"))
             continue
+        if is_eeo(q) and all(profile["eeo"].get(k, DECLINE) == DECLINE for k in EEO_KEYS):
+            option = eeo_decline_option(q)
+            if option:
+                out.answers[q.id] = option
+                continue
+            if not q.required:
+                continue  # voluntary and no decline option offered → leave blank
         hit = bank_get(conn, q)
         if hit is None or (is_high_stakes(q) and not hit[1]):
             if q.required or hit is not None or is_high_stakes(q):
