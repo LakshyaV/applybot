@@ -131,10 +131,21 @@ def read_options(page, field_id: str) -> list[str]:
 
 def choose(page, field_id: str, option: str, typeahead: bool = False) -> None:
     box = page.locator(f'[id="{field_id}"]')
-    box.click()
-    box.fill(option if typeahead else option[:30])  # filters the list; does NOT commit a value
     target = page.locator(MENU_OPTION).filter(has_text=re.compile(rf"^\s*{re.escape(option)}\s*$"))
-    target.first.wait_for(state="visible", timeout=10_000)
+    for attempt in range(3):  # live-search pickers (school) are served by a remote lookup that is sometimes slow
+        box.click()
+        box.fill("")
+        if attempt == 0:
+            box.fill(option if typeahead else option[:30])  # filters the list; does NOT commit a value
+        else:
+            box.press_sequentially(option if typeahead else option[:30], delay=40)  # real key events re-trigger the search
+        try:
+            target.first.wait_for(state="visible", timeout=10_000 if attempt == 0 else 20_000)
+            break
+        except Exception:  # noqa: BLE001
+            if attempt == 2:
+                raise
+            box.press("Escape")
     option_flag = _flag_iso(target.first)
     target.first.click()
     held = _committed(page, field_id)

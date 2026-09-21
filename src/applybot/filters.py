@@ -28,15 +28,24 @@ def seasons_in_title(title: str) -> set[str]:
     return out
 
 
-def is_excluded_company(company: str, cfg: dict) -> bool:
-    """True for an excluded name or '<name> <suffix>' ("Amazon Web Services"), never for a mere substring
-    ("Amazonia Labs"). Over-matching only costs a role; under-matching would double-apply."""
+def _company_in(company: str, names: list[str] | None) -> bool:
+    """True for a listed name or '<name> <suffix>' ("Amazon Web Services"), never for a mere substring
+    ("Amazonia Labs")."""
     name = re.sub(r"[^a-z0-9 ]+", " ", company.lower()).strip()
-    for excluded in cfg.get("exclude_companies") or []:
-        target = re.sub(r"[^a-z0-9 ]+", " ", excluded.lower()).strip()
+    for listed in names or []:
+        target = re.sub(r"[^a-z0-9 ]+", " ", listed.lower()).strip()
         if target and (name == target or name.startswith(target + " ")):
             return True
     return False
+
+
+def is_excluded_company(company: str, cfg: dict) -> bool:
+    """Over-matching only costs a role; under-matching would double-apply."""
+    return _company_in(company, cfg.get("exclude_companies"))
+
+
+def is_priority_company(company: str, cfg: dict) -> bool:
+    return _company_in(company, cfg.get("priority_companies"))
 
 
 def eligibility(job: m.Job, cfg: dict) -> tuple[str, str]:
@@ -86,4 +95,6 @@ def priority(job: m.Job, cfg: dict) -> int:
         score += cfg["eligibility"]["no_sponsorship_penalty"] * 10
     if job.sponsorship == m.SPONSOR_OFFERS:
         score -= 3
+    if is_priority_company(job.company, cfg):
+        score -= cfg.get("priority_company_bonus", 0)
     return score

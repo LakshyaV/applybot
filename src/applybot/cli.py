@@ -417,7 +417,12 @@ def code(job_id: int, value: str):
 
 
 @app.command()
-def run(limit: int = 5, headless: bool = False, jobs: str = typer.Option("", help="Comma-separated job ids to run instead of the queue head")):
+def run(
+    limit: int = 5,
+    headless: bool = False,
+    jobs: str = typer.Option("", help="Comma-separated job ids to run instead of the queue head"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Fill and verify only — never submit, whatever `mode` says"),
+):
     """Work the Greenhouse queue. Whether anything is SUBMITTED is decided only by `mode` in config.yaml,
     which the user controls: dry_run (default) never submits."""
     from playwright.sync_api import sync_playwright
@@ -428,7 +433,7 @@ def run(limit: int = 5, headless: bool = False, jobs: str = typer.Option("", hel
     mode = cfg["mode"]
     if mode not in ("dry_run", "supervised", "auto"):
         raise typer.BadParameter(f"mode {mode!r} is not runnable here")
-    submit = mode in ("supervised", "auto")
+    submit = mode in ("supervised", "auto") and not dry_run
     if submit and profile.get("resume_needs_update"):
         typer.echo(json.dumps({"stopped": "resume_needs_update is set in profile.md — forms and resume disagree",
                                "detail": profile["resume_needs_update"]}))  # fmt: skip
@@ -470,6 +475,26 @@ def run(limit: int = 5, headless: bool = False, jobs: str = typer.Option("", hel
         finally:
             context.close()
     typer.echo(json.dumps({"mode": mode, "summary": dict(tally)}))
+
+
+@app.command()
+def rerank():
+    """Recompute priority for every not-yet-applied job after config.yaml priorities change."""
+    cfg, conn = load_config(), db.connect()
+    rows = conn.execute("SELECT id, company, title, url, category, countries, terms, sponsorship, priority FROM jobs "
+                        "WHERE status IN (?, ?)", (m.QUEUED, m.DISCOVERED)).fetchall()  # fmt: skip
+    changed = 0
+    for r in rows:
+        job = m.Job(company=r["company"], title=r["title"], url=r["url"], category=r["category"] or "Other",
+                    countries=json.loads(r["countries"]), terms=json.loads(r["terms"]), sponsorship=r["sponsorship"] or m.SPONSOR_UNKNOWN)  # fmt: skip
+        new = filters.priority(job, cfg)
+        if new != r["priority"]:
+            conn.execute("UPDATE jobs SET priority = ? WHERE id = ?", (new, r["id"]))
+            changed += 1
+    # re-apply the per-company cap: release everything, then keep each company's best-ranked roles
+    conn.execute("UPDATE jobs SET status = ? WHERE status = ? AND reason = 'over per_company_cap'", (m.QUEUED, m.DISCOVERED))
+    capped = _apply_company_cap(conn, cfg.get("per_company_cap"))
+    typer.echo(json.dumps({"reprioritized": changed, "held_over_cap": capped}))
 
 
 @app.command("apply-exclusions")
