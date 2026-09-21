@@ -216,3 +216,42 @@ def test_assertion_sentence_states_the_claim():
 
 def test_fact_registry_covers_profile_driven_keys():
     assert {"work_authorized", "requires_sponsorship", "eeo_gender", "linkedin", "grad_date", "over_18"} <= fact_keys()
+
+
+# --- a question that names a country is about THAT country -------------------------------------
+
+
+@pytest.mark.parametrize("label, fact, expected", [
+    ("Are you legally authorized to work in the United States?", "work_authorized", "us_work_authorized"),
+    ("Will you require sponsorship to work in the U.S.?", "requires_sponsorship", "us_requires_sponsorship"),
+    ("Are you authorized to work in the US?", "work_authorized", "us_work_authorized"),
+    ("Are you legally entitled to work in Canada?", "work_authorized", "ca_work_authorized"),
+    ("Do you have the right to work in the UK after graduation?", "work_authorized", "intl_work_authorized"),
+    ("Are you legally authorised to work in France?", "us_work_authorized", "intl_work_authorized"),  # label wins
+    ("Will you require sponsorship to work in the country where this job is located?", "requires_sponsorship",
+     "requires_sponsorship"),
+    ("Tell us whether you require sponsorship", "requires_sponsorship", "requires_sponsorship"),  # "us" ≠ "US"
+    ("LinkedIn profile", "linkedin", "linkedin"),
+])  # fmt: skip
+def test_effective_fact(label, fact, expected):
+    from applybot.resolve import effective_fact
+
+    assert effective_fact(label, fact) == expected
+
+
+def test_us_named_question_is_answered_with_us_facts_even_on_a_canadian_posting(conn):
+    q = Question("q", "Are you legally authorized to work in the United States?", "select", True, ["Yes", "No"])
+    # the proposer used the per-job-country fact; the engine must still evaluate it for the US
+    bank_put(conn, q, {"kind": "fact_option", "fact": "work_authorized", "options": {"Yes": True, "No": False}},
+             "llm", approved=True)  # fmt: skip
+    assert resolve(conn, [q], PROFILE, CA).answers == {"q": "No"}
+    assert resolve(conn, [q], PROFILE, US).answers == {"q": "No"}
+    assert resolve(conn, [q], PROFILE, JobContext("Acme", ["UNKNOWN"])).answers == {"q": "No"}  # no job country needed
+
+
+def test_question_naming_two_countries_goes_to_the_human(conn):
+    q = Question("q", "Are you authorized to work in the US or Canada?", "select", True, ["Yes", "No"])
+    bank_put(conn, q, {"kind": "fact_option", "fact": "work_authorized", "options": {"Yes": True, "No": False}},
+             "llm", approved=True)  # fmt: skip
+    out = resolve(conn, [q], PROFILE, CA)
+    assert out.answers == {} and out.human

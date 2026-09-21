@@ -111,11 +111,20 @@ def _committed(page, field_id: str) -> str:
     return " | ".join(t.strip() for t in value.all_inner_texts())
 
 
+# Only the open react-select menu. A page-wide [role=option] query also matches the phone widget's hidden
+# country-code list ("Afghanistan+93" …), which once got recorded as the options of "Degree".
+MENU_OPTION = ".select__menu .select__option"
+
+
 def read_options(page, field_id: str) -> list[str]:
     box = page.locator(f'[id="{field_id}"]')
     box.click()
-    page.wait_for_timeout(250)
-    options = [t.strip() for t in page.locator('[role="option"]').all_inner_texts()]
+    try:
+        page.locator(MENU_OPTION).first.wait_for(state="visible", timeout=4_000)
+    except Exception:  # noqa: BLE001 — async pickers (school search) show nothing until you type
+        box.press("Escape")
+        return []
+    options = [t.strip() for t in page.locator(MENU_OPTION).all_inner_texts()]
     box.press("Escape")
     return options
 
@@ -124,7 +133,7 @@ def choose(page, field_id: str, option: str, typeahead: bool = False) -> None:
     box = page.locator(f'[id="{field_id}"]')
     box.click()
     box.fill(option if typeahead else option[:30])  # filters the list; does NOT commit a value
-    target = page.locator('[role="option"]').filter(has_text=re.compile(rf"^\s*{re.escape(option)}\s*$"))
+    target = page.locator(MENU_OPTION).filter(has_text=re.compile(rf"^\s*{re.escape(option)}\s*$"))
     target.first.wait_for(state="visible", timeout=10_000)
     target.first.click()
     if _committed(page, field_id) != option:
@@ -245,3 +254,54 @@ def readback(page, answers: dict[str, object]) -> dict:
         if any(v is True for k, v in held.items() if k.startswith(g + "[]")):
             empty_required = [i for i in empty_required if not i.startswith(g + "[]")]
     return {"held": held, "empty_required": empty_required, "mismatches": mismatches}
+
+
+# --- submit ------------------------------------------------------------------------------------
+# Outcomes are classified conservatively: anything that is not a positively identified confirmation or a
+# positively identified validation error is UNKNOWN, and the caller must send the job to `verify`
+# (never retried) rather than guess.
+
+CONFIRMED, NEEDS_CODE, INVALID, CHALLENGE, UNKNOWN = "confirmed", "needs_code", "invalid", "challenge", "unknown"
+CONFIRM_TEXT_RE = re.compile(r"thank you for applying|application (has been |was )?(submitted|received)|"
+                             r"we('ve| have) received your application", re.I)  # fmt: skip
+SECURITY_INPUT = '[id^="security-input-"]'
+ERROR_SELECTOR = '[aria-invalid="true"], .helper-text--error, [id$="-error"]'
+CHALLENGE_SELECTOR = 'iframe[src*="recaptcha/api2/bframe"], iframe[src*="hcaptcha.com"], iframe[title*="challenge" i]'
+
+
+def _classify(page) -> str:
+    if page.locator(SECURITY_INPUT).count():
+        return NEEDS_CODE
+    if "/confirmation" in page.url or CONFIRM_TEXT_RE.search(page.locator("body").inner_text()[:4000]):
+        return CONFIRMED
+    for frame in page.locator(CHALLENGE_SELECTOR).all():
+        if frame.is_visible():
+            return CHALLENGE
+    if page.locator(ERROR_SELECTOR).count():
+        return INVALID
+    return UNKNOWN
+
+
+def submit(page, wait_ms: int = 25_000) -> tuple[str, str]:
+    """Click submit exactly once and classify what happened. → (outcome, detail)."""
+    statuses: list[int] = []
+    page.on("response", lambda r: statuses.append(r.status) if r.request.method == "POST" and "greenhouse" in r.url else None)
+    page.get_by_role("button", name=re.compile(r"^submit application$", re.I)).click()
+    waited, outcome = 0, UNKNOWN
+    while waited < wait_ms:
+        page.wait_for_timeout(500)
+        waited += 500
+        outcome = _classify(page)
+        if outcome != UNKNOWN:
+            break
+    return outcome, f"POST statuses={statuses[-3:]} url={page.url}"
+
+
+def enter_security_code(page, code: str) -> tuple[str, str]:
+    """The emailed 8-character code is only valid in THIS browser session; never reload before entering it."""
+    boxes = page.locator(SECURITY_INPUT)
+    if boxes.count() != len(code):
+        return UNKNOWN, f"expected {boxes.count()} characters, got {len(code)}"
+    for i, char in enumerate(code):
+        boxes.nth(i).fill(char)
+    return submit(page)

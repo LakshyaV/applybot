@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import time
+from datetime import date
 from collections import Counter
 
 import typer
@@ -12,6 +15,19 @@ from .config import DATA_DIR, ROOT, load_config, load_profile
 from .forms import greenhouse
 from .normalize import is_tracker
 from .sources import github_repo
+
+GENERIC_OPTION_RE = (r"bachelor|undergrad|software|computer|engineering|english|other|none|not applicable|n/a|"
+                     r"prefer not|decline|job board|github|online")
+
+
+def _relevant_option_re(profile: dict) -> re.Pattern:
+    """Options worth showing an answerer from a 200-entry picker: generic ones plus the user's own values
+    (taken from the profile at runtime so nothing personal is hard-coded in this public repo)."""
+    addr, edu = profile["address"], profile["education"][0]
+    own = [addr.get("city"), addr.get("province_state"), addr.get("country"), edu["school"].split()[-1],
+           (edu.get("end") or "")[:4], profile["availability"]["season"][-4:], *profile["work_authorization"]["citizenships"]]
+    return re.compile("|".join([GENERIC_OPTION_RE, *(re.escape(v) for v in own if v)]), re.I)
+
 
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Internship discovery + application tracker.")
 
@@ -178,14 +194,22 @@ def survey(ats: str = "greenhouse", limit: int = 50):
 
 
 @app.command()
-def questions(limit: int = 20, as_json: bool = typer.Option(False, "--json"), high_stakes: bool | None = None):
+def questions(limit: int = 20, offset: int = 0, as_json: bool = typer.Option(False, "--json"), tier: str = ""):
     """Unanswered questions, most common first (deduped across jobs). Input for the `answerer`."""
     conn = db.connect()
-    clause = "" if high_stakes is None else f"WHERE high_stakes = {int(high_stakes)}"
-    rows = conn.execute(f"SELECT * FROM questions {clause} ORDER BY job_count DESC, qhash LIMIT ?", (limit,)).fetchall()
+    tiers = ["low", "verify", "critical"]
+    relevant_re = _relevant_option_re(load_profile())
+    clause = f"WHERE high_stakes = {tiers.index(tier)}" if tier else ""
+    rows = conn.execute(f"SELECT * FROM questions {clause} ORDER BY job_count DESC, qhash LIMIT ? OFFSET ?",
+                        (limit, offset)).fetchall()  # fmt: skip
     for r in rows:
-        item = {"qhash": r["qhash"], "jobs": r["job_count"], "tier": ["low", "verify", "critical"][r["high_stakes"]], "type": r["field_type"],
-                "label": r["label"], "options": json.loads(r["options"])}  # fmt: skip
+        options = json.loads(r["options"])
+        item = {"qhash": r["qhash"], "jobs": r["job_count"], "tier": tiers[r["high_stakes"]], "type": r["field_type"],
+                "label": r["label"], "options": options}  # fmt: skip
+        if as_json and len(options) > 25:  # country/school pickers: show only options that could matter
+            relevant = [o for o in options if relevant_re.search(o)]
+            item["options"] = options[:4] + relevant
+            item["options_note"] = f"{len(options)} options in total; showing the first 4 plus profile-relevant ones"
         if as_json:
             typer.echo(json.dumps(item, ensure_ascii=False))
         else:
@@ -195,17 +219,26 @@ def questions(limit: int = 20, as_json: bool = typer.Option(False, "--json"), hi
 
 
 @app.command("answers-import")
-def answers_import(path: str, origin: str = "llm"):
+def answers_import(path: str, origin: str = "llm", replace: bool = typer.Option(False, help="Also overwrite existing UNCLEARED bank entries")):
     """Load proposed resolutions [{qhash, resolution}] into the bank. Every entry is validated; high-stakes
-    entries stay unusable until the user approves them."""
+    entries stay unusable until cleared. Requiredness is per form, so it is enforced at fill time, not here."""
     conn = db.connect()
     ok, rejected = 0, []
     for item in json.loads(open(path).read()):
+        if len(item["qhash"]) < 20:  # unique-prefix shorthand, like git
+            matches = conn.execute("SELECT qhash FROM questions WHERE qhash LIKE ? UNION SELECT qhash FROM answer_bank "
+                                   "WHERE qhash LIKE ?", (item["qhash"] + "%",) * 2).fetchall()  # fmt: skip
+            if len(matches) != 1:
+                rejected.append((item["qhash"], f"prefix matches {len(matches)} questions"))
+                continue
+            item["qhash"] = matches[0]["qhash"]
         row = conn.execute("SELECT * FROM questions WHERE qhash = ?", (item["qhash"],)).fetchone()
+        if row is None and replace:
+            row = conn.execute("SELECT * FROM answer_bank WHERE qhash = ? AND approved = 0", (item["qhash"],)).fetchone()
         if row is None:
-            rejected.append((item["qhash"], "not a pending question"))
+            rejected.append((item["qhash"], "not a pending question (or already cleared)"))
             continue
-        q = rs.Question("", row["label"], row["field_type"], True, json.loads(row["options"]))
+        q = rs.Question("", row["label"], row["field_type"], False, json.loads(row["options"]))
         try:
             rs.bank_put(conn, q, item["resolution"], origin, approved=False)
             ok += 1
@@ -226,8 +259,20 @@ def approvals(
     level = {"critical": rs.CRITICAL, "verify": rs.VERIFY}[tier]
     conn = db.connect()
     for qhash in approve:
-        conn.execute("UPDATE answer_bank SET approved = 1, origin = origin || ? WHERE qhash = ? AND high_stakes = ?",
-                     (f"+{tier}", qhash, level))  # fmt: skip
+        row = conn.execute("SELECT * FROM answer_bank WHERE qhash = ? AND high_stakes = ? AND approved = 0",
+                           (qhash, level)).fetchone()  # fmt: skip
+        if row is None:
+            typer.echo(f"  {qhash}: not an uncleared {tier} entry — skipped")
+            continue
+        conn.execute("UPDATE answer_bank SET approved = 1, origin = origin || ? WHERE qhash = ?", (f"+{tier}", qhash))
+        if level == rs.CRITICAL:  # audit trail the user can skim and veto
+            q = rs.Question("", row["label"], row["field_type"], True, json.loads(row["options"]))
+            log = ROOT / "profile" / "approved_claims.md"
+            if not log.exists():
+                log.write_text("# Critical answers cleared on my behalf\n\nTo veto one: tell the agent its id, or run "
+                               "`uv run applybot bank-revoke <id>`.\n\n")
+            with log.open("a") as fh:
+                fh.write(f"- `{qhash}` {date.today().isoformat()} — {rs.assertion_sentence(q, json.loads(row['resolution']))}\n")
     rows = conn.execute("SELECT * FROM answer_bank WHERE high_stakes = ? AND approved = 0 ORDER BY created_at", (level,)).fetchall()
     for r in rows:
         q = rs.Question("", r["label"], r["field_type"], True, json.loads(r["options"]))
@@ -237,59 +282,151 @@ def approvals(
         typer.echo("nothing awaiting clearance")
 
 
-@app.command("dry-run")
-def dry_run(job_id: int, headless: bool = False):
-    """Fill ONE Greenhouse application and screenshot it for review. This command has no submit step."""
+def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict:
+    """One Greenhouse application: schema → preflight → resolve → fill → readback → (optionally) submit.
+    Returns a small summary dict and leaves the job in its final status."""
+    job_id = row["id"]
+    run_dir = DATA_DIR / "runs" / str(job_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    summary = {"job": job_id, "company": row["company"], "title": row["title"][:60]}
+
+    def finish(status: str, reason: str = "", **extra) -> dict:
+        db.set_status(conn, job_id, status, reason)
+        return {**summary, "status": status, "reason": reason[:160], **extra}
+
+    try:
+        questions, meta = greenhouse.parse(greenhouse.fetch(row["board"], row["ats_job_id"]))
+    except greenhouse.Gone:
+        return finish(m.CLOSED, "posting removed (ATS API 404)")
+    countries = meta["countries"] if meta["countries"] != ["UNKNOWN"] else json.loads(row["countries"])
+    blocked, reason = preflight.check(meta["description"], countries)
+    if blocked:
+        return finish(blocked, reason)
+    ctx = rs.JobContext(row["company"], countries)
+    facts = rs.Facts(profile, ctx)
+    for q in questions:
+        q.company = row["company"]
+
+    page = context.new_page()
+    try:
+        page.goto(meta["url"] or row["url"], wait_until="networkidle", timeout=60_000)
+        if not page.locator("form #first_name").count():
+            return finish(m.NEEDS_HUMAN, "not the standard Greenhouse form layout (embedded/legacy board)")
+        questions += greenhouse.dom_only_questions(page, questions, row["company"])
+        preset = greenhouse.preset_answers(questions, facts, str(ROOT / profile["resume_path"]))
+        result = rs.resolve(conn, questions, profile, ctx, preset)
+        for q in result.misses:
+            rs.record_miss(conn, q, job_id)
+        (run_dir / "answers.json").write_text(json.dumps(result.answers, indent=1, ensure_ascii=False, default=str))
+        if result.human:
+            return finish(m.NEEDS_HUMAN, "; ".join(f"{q.label[:60]} ({why})" for q, why in result.human[:3]))
+        if result.needs_input:
+            return finish(m.NEEDS_INPUT, "; ".join(f"{q.label[:60]} (missing {fact})" for q, fact in result.needs_input[:3]))
+        if result.misses or result.essays:
+            pending = [q.label[:50] for q in (result.misses + result.essays)[:4]]
+            return finish(m.NEEDS_ANSWERS, f"{len(result.misses)} unanswered, {len(result.essays)} essays: {pending}")
+
+        report = greenhouse.fill(page, questions, dict(result.answers), facts)
+        (run_dir / "report.json").write_text(json.dumps(report, indent=1, ensure_ascii=False, default=str))
+        page.screenshot(path=str(run_dir / "filled.png"), full_page=True)
+        if report["mismatches"] or report["empty_required"]:
+            return finish(m.FAILED, f"readback: mismatches={list(report['mismatches'])} empty={report['empty_required'][:5]}")
+        if not submit:
+            return finish(m.DRY_RUN_DONE, "filled and verified; not submitted (dry run)", filled=len(result.answers))
+
+        application_id = conn.execute(
+            "INSERT INTO applications (job_id, mode, lane, started_at, run_dir) VALUES (?,?,?,?,?)",
+            (job_id, cfg["mode"], "greenhouse", int(time.time()), str(run_dir)),
+        ).lastrowid
+        db.begin_submit(conn, job_id, application_id)  # write-ahead: from here a crash means `verify`, never a retry
+        outcome, detail = greenhouse.submit(page)
+        if outcome == greenhouse.NEEDS_CODE:
+            typer.echo(json.dumps({**summary, "event": "needs_code", "hint": f"uv run applybot code {job_id} <8-char code from email>"}))
+            code = _wait_for_code(conn, job_id, timeout_s=600)
+            outcome, detail = greenhouse.enter_security_code(page, code) if code else (greenhouse.UNKNOWN, "no code within 10 min")
+        page.screenshot(path=str(run_dir / "after_submit.png"), full_page=True)
+        final = {greenhouse.CONFIRMED: m.SUBMITTED, greenhouse.INVALID: m.FAILED,
+                 greenhouse.CHALLENGE: m.NEEDS_HUMAN}.get(outcome, m.VERIFY)  # fmt: skip
+        conn.execute("UPDATE applications SET finished_at = ?, outcome = ?, confirmation = ? WHERE id = ?",
+                     (int(time.time()), outcome, detail, application_id))  # fmt: skip
+        return finish(final, f"{outcome}: {detail}")
+    except Exception as err:  # noqa: BLE001 — one bad form must not stop the queue
+        current = conn.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()["status"]
+        if current == m.SUBMITTING:
+            return finish(m.VERIFY, f"error after submit click: {type(err).__name__}: {str(err)[:120]}")
+        return finish(m.FAILED, f"{type(err).__name__}: {str(err)[:160]}")
+    finally:
+        page.close()
+
+
+def _wait_for_code(conn, job_id: int, timeout_s: int) -> str | None:
+    conn.execute("CREATE TABLE IF NOT EXISTS codes (job_id INTEGER PRIMARY KEY, code TEXT NOT NULL)")
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        row = conn.execute("SELECT code FROM codes WHERE job_id = ?", (job_id,)).fetchone()
+        if row:
+            conn.execute("DELETE FROM codes WHERE job_id = ?", (job_id,))
+            return row["code"].strip()
+        time.sleep(3)
+    return None
+
+
+@app.command()
+def code(job_id: int, value: str):
+    """Hand an emailed verification code to the running application (same browser session)."""
+    conn = db.connect()
+    conn.execute("CREATE TABLE IF NOT EXISTS codes (job_id INTEGER PRIMARY KEY, code TEXT NOT NULL)")
+    conn.execute("INSERT OR REPLACE INTO codes (job_id, code) VALUES (?, ?)", (job_id, value))
+    typer.echo("code queued")
+
+
+@app.command()
+def run(limit: int = 5, headless: bool = False):
+    """Work the Greenhouse queue. Whether anything is SUBMITTED is decided only by `mode` in config.yaml,
+    which the user controls: dry_run (default) never submits."""
     from playwright.sync_api import sync_playwright
 
     from . import browser
 
-    conn, profile = db.connect(), load_profile()
-    row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
-    if row is None or row["ats"] != "greenhouse":
-        raise typer.BadParameter("dry-run currently supports jobs whose ats is 'greenhouse'")
-    questions, meta = greenhouse.parse(greenhouse.fetch(row["board"], row["ats_job_id"]))
-    countries = meta["countries"] if meta["countries"] != ["UNKNOWN"] else json.loads(row["countries"])
-    blocked, reason = preflight.check(meta["description"], countries)
-    if blocked:
-        db.set_status(conn, job_id, blocked, reason)
-        typer.echo(json.dumps({"job": job_id, "status": blocked, "reason": reason}))
-        return
-    ctx = rs.JobContext(row["company"], countries)
-    facts = rs.Facts(profile, ctx)
-    run_dir = DATA_DIR / "runs" / str(job_id)
-    run_dir.mkdir(parents=True, exist_ok=True)
+    cfg, profile, conn = load_config(), load_profile(), db.connect()
+    mode = cfg["mode"]
+    if mode not in ("dry_run", "supervised", "auto"):
+        raise typer.BadParameter(f"mode {mode!r} is not runnable here")
+    submit = mode in ("supervised", "auto")
+    db.recover(conn)
+    if submit:  # forms that already passed a dry run are vetted: put them back at the front of the queue
+        conn.execute("UPDATE jobs SET status = ?, reason = 'passed dry run' WHERE status = ?", (m.QUEUED, m.DRY_RUN_DONE))
+        today = conn.execute("SELECT COUNT(*) FROM applications WHERE outcome = 'confirmed' AND finished_at > ?",
+                             (int(time.time()) - 86400,)).fetchone()[0]  # fmt: skip
+        limit = min(limit, cfg["pacing"]["daily_submit_cap"] - today)
+        if mode == "supervised":
+            done = conn.execute("SELECT COUNT(*) FROM applications WHERE mode = 'supervised' AND outcome = 'confirmed'").fetchone()[0]
+            limit = min(limit, cfg["supervised_limit"] - done)
+        if limit <= 0:
+            typer.echo(json.dumps({"stopped": "submit cap reached for this mode; the user decides what happens next"}))
+            return
 
+    tally = Counter()
     with sync_playwright() as pw:
         context = browser.launch(pw, headless=headless)
-        page = context.new_page()
         try:
-            page.goto(meta["url"] or row["url"], wait_until="networkidle", timeout=60_000)
-            for q in questions:
-                q.company = row["company"]
-            questions += greenhouse.dom_only_questions(page, questions, row["company"])
-            preset = greenhouse.preset_answers(questions, facts, str(ROOT / profile["resume_path"]))
-            result = rs.resolve(conn, questions, profile, ctx, preset)
-            for q in result.misses:
-                rs.record_miss(conn, q, job_id)
-            report = greenhouse.fill(page, questions, dict(result.answers), facts)
-            page.screenshot(path=str(run_dir / "filled.png"), full_page=True)
+            for row in db.claim(conn, limit, f"run-{os.getpid()}", ["greenhouse"]):
+                outcome = _process(conn, profile, cfg, context, row, submit)
+                tally[outcome["status"]] += 1
+                typer.echo(json.dumps(outcome, ensure_ascii=False))
+                if submit and outcome["status"] == m.SUBMITTED:
+                    time.sleep(cfg["pacing"]["submit_min_interval_seconds"])
         finally:
             context.close()
+    typer.echo(json.dumps({"mode": mode, "summary": dict(tally)}))
 
-    (run_dir / "answers.json").write_text(json.dumps(result.answers, indent=1, ensure_ascii=False, default=str))
-    (run_dir / "report.json").write_text(json.dumps(report, indent=1, ensure_ascii=False, default=str))
-    label = {q.id: q.label for q in questions}
-    typer.echo(json.dumps({
-        "job": job_id, "company": row["company"], "title": row["title"], "country": ctx.country,
-        "filled": len(result.answers), "awaiting_answer_bank": [q.label[:70] for q in result.misses],
-        "needs_your_input": [f"{q.label[:50]} (missing: {fact})" for q, fact in result.needs_input],
-        "human_only": [q.label[:60] for q, _ in result.human], "essays": [q.label[:60] for q in result.essays],
-        "readback_mismatches": report["mismatches"],
-        "required_still_empty": [label.get(i, i)[:60] for i in report["empty_required"]],
-        "would_be_submittable": result.ready and not report["mismatches"] and not report["empty_required"],
-        "screenshot": str(run_dir / "filled.png"),
-    }, indent=1, ensure_ascii=False))
+
+@app.command("bank-revoke")
+def bank_revoke(qhash: str):
+    """Un-clear a bank entry (the user's veto). Jobs that relied on it will pause at that question again."""
+    changed = db.connect().execute("UPDATE answer_bank SET approved = 0, origin = origin || '+revoked' WHERE qhash = ?",
+                                   (qhash,)).rowcount  # fmt: skip
+    typer.echo("revoked" if changed else "no such entry")
 
 
 @app.command()

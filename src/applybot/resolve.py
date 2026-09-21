@@ -105,6 +105,9 @@ DECLINE_PHRASES = {
     "prefer not to disclose", "i prefer not to disclose", "choose not to disclose", "i choose not to disclose",
     "decline to answer", "decline to state", "i do not wish to self-identify", "i do not wish to disclose",
     "i do not wish to provide this information", "do not wish to answer", "not declared", "prefer not to respond",
+    "prefer not to state", "i prefer not to state", "prefer not to identify", "prefer not to self-identify",
+    "i'd rather not say", "i would rather not say", "rather not say", "i'd rather not disclose",
+    "i do not wish to identify", "i choose not to self-identify", "choose not to self-identify", "choose not to identify",
 }  # fmt: skip
 LOW, VERIFY, CRITICAL = 0, 1, 2
 
@@ -156,6 +159,10 @@ class Ambiguous(Exception):
 
 MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September",
                "October", "November", "December"]  # fmt: skip
+DEMONYMS = {"Canada": "Canadian", "United States": "U.S.", "United Kingdom": "British", "India": "Indian"}
+EU_MEMBERS = {"Austria", "Belgium", "Bulgaria", "Croatia", "Cyprus", "Czechia", "Denmark", "Estonia", "Finland", "France",
+              "Germany", "Greece", "Hungary", "Ireland", "Italy", "Latvia", "Lithuania", "Luxembourg", "Malta",
+              "Netherlands", "Poland", "Portugal", "Romania", "Slovakia", "Slovenia", "Spain", "Sweden"}  # fmt: skip
 COUNTRY_PARAM_FACTS = {"work_authorized", "requires_sponsorship"}
 DECLINE = "decline"
 
@@ -205,6 +212,33 @@ class Facts:
             "linkedin": links["linkedin"], "github": links["github"], "website": links["website"],
             "address_line1": addr.get("line1"), "city": addr.get("city"), "province_state": addr.get("province_state"),
             "postal_code": addr.get("postal_code"), "country_of_residence": addr.get("country"),
+            "province_code": addr.get("province_code"),
+            "location_full": ", ".join(x for x in (addr.get("city"), addr.get("province_state"), addr.get("country")) if x)
+            if addr.get("city") else None,
+            "us_resident": addr.get("country") == "United States" if addr.get("country") else None,
+            "citizenship_country": auth["citizenships"][0] if auth["citizenships"] else None,
+            # Questions that NAME a country must use these, never the per-job-country facts: "authorized to work
+            # in the United States?" is false for this user even on a Canadian posting.
+            "us_work_authorized": auth["by_country"].get("US", auth["default"]).get("authorized"),
+            "us_requires_sponsorship": auth["by_country"].get("US", auth["default"]).get("requires_sponsorship"),
+            "ca_work_authorized": auth["by_country"].get("CA", auth["default"]).get("authorized"),
+            "ca_requires_sponsorship": auth["by_country"].get("CA", auth["default"]).get("requires_sponsorship"),
+            "intl_work_authorized": auth["default"].get("authorized"),  # any country other than CA / US
+            "intl_requires_sponsorship": auth["default"].get("requires_sponsorship"),
+            "address_full": ", ".join(x for x in (addr.get("line1"), addr.get("city"), addr.get("province_state"),
+                                                  addr.get("postal_code"), addr.get("country")) if x)
+            if addr.get("line1") else None,
+            "earliest_start_month": MONTH_NAMES[int(avail["earliest_start"][5:7]) - 1] if avail.get("earliest_start") else None,
+            "most_recent_employer": hist.get("most_recent_employer"),
+            "citizenship_statement": " and ".join(f"{DEMONYMS.get(c, c)} citizen" for c in auth["citizenships"]) or None,
+            "eu_citizen": any(c in EU_MEMBERS for c in auth["citizenships"]) if auth["citizenships"] else None,
+            "availability_text": (f"{avail['duration_weeks']} weeks ({avail['earliest_start']} to {avail['latest_end']})"
+                                  if avail.get("duration_weeks") and avail.get("earliest_start") and avail.get("latest_end")
+                                  else None),
+            "currently_employed_here": any(company in normalize(cur) or normalize(cur) in company
+                                           for cur in hist.get("currently_employed_at", [])) if company else None,
+            "government_employee_or_official": hist.get("government_employee_or_official"),
+            "outside_business_activities": hist.get("outside_business_activities"),
             "school": edu["school"], "degree": edu["degree"], "degree_level": edu["degree_level"], "major": edu["major"],
             "gpa": None if edu.get("gpa") in (None, "do_not_disclose") else str(edu["gpa"]),
             "grad_year": end[:4] if end else None, "grad_month": month,
@@ -225,6 +259,7 @@ class Facts:
             "how_did_you_hear": p["defaults"].get("how_did_you_hear"),
             "salary_expectation": p["defaults"].get("salary_expectation"),
             "certify_truthful": True if p["consents"].get("agent_may_certify_truthfulness") else None,
+            "acknowledge_privacy_notice": True if p["consents"].get("agent_may_acknowledge_privacy_notice") else None,
             "sms_opt_in": p["consents"].get("sms_marketing_opt_in"),
             "talent_community_opt_in": p["consents"].get("talent_community_opt_in"),
             "today": date.today().isoformat(),
@@ -285,8 +320,11 @@ def validate_resolution(question: Question, res: dict) -> list[str]:
             errors.append("two options map to the same fact value")
     if kind in ("decline", "literal") and question.options:
         chosen = res.get("option") if kind == "decline" else res.get("value")
-        if normalize(str(chosen)) not in options:
-            errors.append(f"{chosen!r} is not one of the form's options")
+        for item in chosen if isinstance(chosen, list) else [chosen]:
+            if normalize(str(item)) not in options:
+                errors.append(f"{item!r} is not one of the form's options")
+        if isinstance(chosen, list) and question.type != "multiselect":
+            errors.append("a list value is only valid for a multiselect")
     if kind == "fact_checkbox" and (question.type != "checkbox" or question.options):
         errors.append("fact_checkbox is only for a lone checkbox")
     if kind == "fact_text" and question.options:
@@ -303,7 +341,14 @@ def assertion_sentence(question: Question, res: dict) -> str:
     kind = res["kind"]
     if kind == "fact_option":
         pairs = "; ".join(f"“{label}” ⇔ {res['fact']} = {json.dumps(value)}" for label, value in res["options"].items())
-        scope = " (evaluated per job country)" if res["fact"] in COUNTRY_PARAM_FACTS else ""
+        try:
+            used = effective_fact(question.label, res["fact"])
+        except Ambiguous:
+            used = "AMBIGUOUS (names several countries → always sent to the human)"
+        if used != res["fact"]:
+            scope = f" [evaluated as {used}: the question names that country]"
+        else:
+            scope = " (evaluated per job country)" if res["fact"] in COUNTRY_PARAM_FACTS else ""
         return f"“{question.label}” → {pairs}{scope}"
     if kind == "fact_checkbox":
         return f"“{question.label}” → ticked only while {res['fact']} = true"
@@ -397,13 +442,40 @@ def resolve(conn: sqlite3.Connection, questions: list[Question], profile: dict, 
         except Ambiguous:
             out.human.append((q, "job country unknown or mixed; work-authorization facts are per country"))
             continue
-        if res["kind"] == "per_job":
+        if res["kind"] == "skip" and q.required:
+            out.human.append((q, "banked as skip but this form requires it"))
+        elif res["kind"] == "per_job":
             out.essays.append(q)
         elif res["kind"] == "human":
             out.human.append((q, "marked human-only in the bank"))
         elif answer is not None:
             out.answers[q.id] = answer
     return out
+
+
+# A question that NAMES a country is about that country, whatever the posting's location and whatever fact a
+# proposer picked. "Are you authorized to work in the United States?" on a Toronto posting is still about the US.
+# "US" must be upper-case to count (otherwise "tell us about…" would match); the spelled-out forms are case-blind.
+NAMED_US_RE = re.compile(r"(?i:\bunited states\b|\bu\.s\b|\bu\.s\.a\b|\busa\b|\bamerica\b)|\bUS\b")
+NAMED_CA_RE = re.compile(r"\bcanad(a|ian)\b", re.I)
+NAMED_OTHER_RE = re.compile(
+    r"\b(united kingdom|uk|u\.k|britain|england|ireland|france|germany|netherlands|spain|italy|poland|sweden|"
+    r"switzerland|europe|eu|european union|schengen|india|singapore|hong kong|china|japan|korea|australia|"
+    r"new zealand|brazil|mexico|peru|argentina|israel|uae|dubai|abu dhabi)\b",
+    re.I,
+)
+_EXPLICIT = {"work_authorized": "{}_work_authorized", "requires_sponsorship": "{}_requires_sponsorship"}
+
+
+def effective_fact(label: str, fact: str) -> str:
+    """Swap a per-job-country fact for the named country's fact when the question names exactly one."""
+    base = next((b for b in _EXPLICIT if fact == b or fact.endswith("_" + b)), None)
+    if base is None:
+        return fact
+    named = [code for code, rx in (("us", NAMED_US_RE), ("ca", NAMED_CA_RE), ("intl", NAMED_OTHER_RE)) if rx.search(label)]
+    if len(named) > 1:
+        raise Ambiguous(f"question names several countries: {label[:80]}")
+    return _EXPLICIT[base].format(named[0]) if named else fact
 
 
 def _apply(q: Question, res: dict, facts: Facts):
@@ -414,7 +486,7 @@ def _apply(q: Question, res: dict, facts: Facts):
         return res["value"]
     if kind == "decline":
         return res["option"]
-    value = facts.get(res["fact"])
+    value = facts.get(effective_fact(q.label, res["fact"]))
     if kind == "fact_text":
         return str(value)
     if kind == "fact_checkbox":

@@ -94,6 +94,7 @@ defaults:
 
 consents:
   agent_may_certify_truthfulness: true
+  agent_may_acknowledge_privacy_notice: true
   sms_marketing_opt_in: false
   talent_community_opt_in: false
 
