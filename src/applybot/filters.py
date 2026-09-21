@@ -28,6 +28,17 @@ def seasons_in_title(title: str) -> set[str]:
     return out
 
 
+def is_excluded_company(company: str, cfg: dict) -> bool:
+    """True for an excluded name or '<name> <suffix>' ("Amazon Web Services"), never for a mere substring
+    ("Amazonia Labs"). Over-matching only costs a role; under-matching would double-apply."""
+    name = re.sub(r"[^a-z0-9 ]+", " ", company.lower()).strip()
+    for excluded in cfg.get("exclude_companies") or []:
+        target = re.sub(r"[^a-z0-9 ]+", " ", excluded.lower()).strip()
+        if target and (name == target or name.startswith(target + " ")):
+            return True
+    return False
+
+
 def eligibility(job: m.Job, cfg: dict) -> tuple[str, str]:
     """Return (status, reason). status is QUEUED when the job should be applied to."""
     target = cfg["target"]["season"]
@@ -35,6 +46,8 @@ def eligibility(job: m.Job, cfg: dict) -> tuple[str, str]:
 
     if not job.active:
         return m.CLOSED, "source marks it closed"
+    if is_excluded_company(job.company, cfg):
+        return m.ALREADY_APPLIED, "user already applied to this company by hand"
     if host_matches(job.url, cfg["blocked_hosts"]):
         return m.NEEDS_HUMAN, "blocked host (never automated)"
 

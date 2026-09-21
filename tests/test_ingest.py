@@ -223,3 +223,16 @@ def test_upstream_close_withdraws_untouched_jobs_only(tmp_path):
     assert db.upsert_job(conn, make(1), m.CLOSED, "closed upstream", 0) == "closed"
     assert db.upsert_job(conn, make(2), m.CLOSED, "closed upstream", 0) == "seen"
     assert conn.execute("SELECT status FROM jobs WHERE id = 2").fetchone()[0] == m.SUBMITTED
+
+
+@pytest.mark.parametrize("company, excluded", [
+    ("Stripe", True), ("stripe", True), ("Amazon", True), ("Amazon Web Services", True), ("Amazon Robotics", True),
+    ("Google", True), ("Google DeepMind", True), ("Microsoft", True), ("Microsoft Research", True),
+    ("Amazonia Labs", False), ("Stripes & Co", False), ("Googleplex Tours", False), ("Robinhood", False),
+])  # fmt: skip
+def test_user_excluded_companies(company, excluded):
+    cfg = {**CFG, "exclude_companies": ["Stripe", "Google", "Microsoft", "Amazon"]}
+    assert filters.is_excluded_company(company, cfg) is excluded
+    job = gr.build_job(company=company, title="SWE Intern", raw_url="https://x.com/1", locations=["Toronto, ON"],
+                       source="t", terms=[SEASON])  # fmt: skip
+    assert (filters.eligibility(job, cfg)[0] == m.ALREADY_APPLIED) is excluded

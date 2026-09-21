@@ -119,8 +119,8 @@ def list_jobs(status: str = m.QUEUED, limit: int = 15, ats: str = ""):
         typer.echo(f"{r['id']:>6} p{r['priority']:<3} {r['ats']:<16} {r['company'][:24]:<24} {r['title'][:60]}  {r['countries']}")
 
 
-@app.command()
-def next(n: int = 3, ats: str = typer.Option("", help="Comma-separated ATS filter")):
+@app.command("next")
+def next_jobs(n: int = 3, ats: str = typer.Option("", help="Comma-separated ATS filter")):  # not `next`: shadows the builtin
     """Atomically lease the next n queued jobs and print them as JSON lines."""
     conn = db.connect()
     db.recover(conn)
@@ -302,6 +302,9 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict
         db.set_status(conn, job_id, status, reason)
         return {**summary, "status": status, "reason": reason[:160], **extra}
 
+    if filters.is_excluded_company(row["company"], cfg):  # last line of defence, whatever the queue says
+        return finish(m.ALREADY_APPLIED, "user already applied to this company by hand")
+
     try:
         questions, meta = greenhouse.parse(greenhouse.fetch(row["board"], row["ats_job_id"]))
     except greenhouse.Gone:
@@ -467,6 +470,65 @@ def run(limit: int = 5, headless: bool = False, jobs: str = typer.Option("", hel
         finally:
             context.close()
     typer.echo(json.dumps({"mode": mode, "summary": dict(tally)}))
+
+
+@app.command("apply-exclusions")
+def apply_exclusions():
+    """Mark every not-yet-applied job at a company in `exclude_companies` as already applied."""
+    cfg, conn = load_config(), db.connect()
+    open_statuses = (m.QUEUED, m.DISCOVERED, m.NEEDS_ANSWERS, m.NEEDS_INPUT, m.NEEDS_HUMAN, m.FAILED, m.DRY_RUN_DONE)
+    rows = conn.execute(f"SELECT id, company FROM jobs WHERE status IN ({','.join('?' * len(open_statuses))})",
+                        open_statuses).fetchall()  # fmt: skip
+    hit = Counter()
+    for row in rows:
+        if filters.is_excluded_company(row["company"], cfg):
+            db.set_status(conn, row["id"], m.ALREADY_APPLIED, "user already applied to this company by hand")
+            hit[row["company"]] += 1
+    typer.echo(json.dumps({"marked_already_applied": sum(hit.values()), "by_company": dict(hit.most_common())}))
+
+
+@app.command("resolve-embeds")
+def resolve_embeds(limit: int = 400):
+    """Many company career sites (Stripe, Coinbase, Datadog…) are Greenhouse underneath: the URL carries `gh_jid`.
+    Find each one's Greenhouse board by asking the public API for that exact job id, then treat it as a normal
+    Greenhouse job. A board is accepted only when the API returns THIS job on it — a name guess alone is never enough."""
+    import httpx
+
+    api = "https://boards-api.greenhouse.io/v1/boards/{}/jobs/{}"
+    conn = db.connect()
+    rows = conn.execute("SELECT id, company, url, ats_job_id FROM jobs WHERE ats = 'greenhouse_embed' AND status IN (?, ?) "
+                        "ORDER BY priority, date_posted DESC LIMIT ?", (m.QUEUED, m.DISCOVERED, limit)).fetchall()  # fmt: skip
+    boards: dict[str, str | None] = {}
+    tally = Counter()
+    with httpx.Client(timeout=20, follow_redirects=True) as client:
+
+        def exists(token: str, job_id: str) -> bool:
+            for _ in range(2):
+                try:
+                    return client.get(api.format(token, job_id)).status_code == 200
+                except httpx.HTTPError:
+                    continue
+            return False
+
+        for row in rows:
+            base = re.sub(r"[^a-z0-9]", "", row["company"].lower())
+            host = re.sub(r"^(www|careers|jobs|boards|app)\\.", "", row["url"].split("/")[2]).split(".")[0]
+            guesses = [g for g in dict.fromkeys([boards.get(base) or "", base, host, base + "inc", base + "careers",
+                       base.replace("trading", ""), re.sub(r"(labs|technologies|capital|group|university|ai)$", "", base)]) if g]  # fmt: skip
+            token = next((g for g in guesses if exists(g, row["ats_job_id"])), None)
+            boards[base] = token or boards.get(base)
+            if not token:
+                tally["unresolved"] += 1
+                continue
+            key = f"greenhouse:{token}:{row['ats_job_id']}".lower()
+            if conn.execute("SELECT 1 FROM jobs WHERE key = ? AND id != ?", (key, row["id"])).fetchone():
+                db.set_status(conn, row["id"], m.DUPLICATE, "same posting already tracked under its Greenhouse board")
+                tally["duplicate"] += 1
+                continue
+            conn.execute("UPDATE jobs SET ats = 'greenhouse', board = ?, key = ?, raw_url = url, url = ? WHERE id = ?",
+                         (token, key, f"https://job-boards.greenhouse.io/{token}/jobs/{row['ats_job_id']}", row["id"]))  # fmt: skip
+            tally["resolved"] += 1
+    typer.echo(json.dumps(dict(tally)))
 
 
 PLACEHOLDER_RE = re.compile(r"\[[^\]]{2,40}\]|\{[a-z_ ]{2,30}\}|lorem ipsum|as an ai\b|language model", re.I)
