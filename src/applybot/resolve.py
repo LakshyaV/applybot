@@ -249,6 +249,8 @@ class Facts:
             "coop_program": edu.get("coop_program"),
             "class_standing": edu.get("class_standing_fall_2026"),
             "high_school_grad_year": edu.get("high_school_grad_year"),
+            "conflict_of_interest_any": hist.get("conflict_of_interest_any"),
+            "government_official_ties": hist.get("government_official_ties"),
             "pending_criminal_charges": hist.get("pending_criminal_charges"),
             # for questions that ask about "convictions OR pending charges" in one breath; unknown if either is
             "criminal_conviction_or_charges": (
@@ -470,7 +472,7 @@ def resolve(conn: sqlite3.Connection, questions: list[Question], profile: dict, 
         except Ambiguous:
             out.human.append((q, "job country unknown or mixed; work-authorization facts are per country"))
             continue
-        if not q.required and res["kind"] in ("skip", "skip_job", "human"):
+        if not q.required and res["kind"] in ("skip", "skip_job", "human", "per_job"):
             continue  # optional on THIS form → leave it blank instead of blocking the application
         if res["kind"] == "skip":
             out.human.append((q, "banked as skip but this form requires it"))

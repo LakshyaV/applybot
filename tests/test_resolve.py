@@ -288,3 +288,14 @@ def test_human_only_bank_entry_blocks_only_when_required(conn):
         bank_put(conn, q, {"kind": "human"}, "llm", approved=False)
     out = resolve(conn, [optional, required], PROFILE, US)
     assert out.answers == {} and [q.id for q, _ in out.human] == ["h2"]
+
+
+def test_per_job_essays_are_requested_only_when_required(conn):
+    required = Question("w1", "Why do you want to intern at {company}?", "textarea", True)
+    optional = Question("w2", "Anything else you would like us to know about {company}?", "textarea", False)
+    for q in (required, optional):
+        bank_put(conn, q, {"kind": "per_job"}, "llm", approved=False)
+    out = resolve(conn, [required, optional], PROFILE, US)
+    assert [q.id for q in out.essays] == ["w1"] and out.answers == {}
+    # once an essay has been written for this job it arrives as a preset answer and the form is ready
+    assert resolve(conn, [required, optional], PROFILE, US, preset={"w1": "Because …"}).ready

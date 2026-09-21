@@ -90,6 +90,17 @@ CREATE TABLE IF NOT EXISTS job_questions (
   PRIMARY KEY (job_id, qhash)
 );
 
+-- free-text answers written for ONE job (never banked: "Why {company}?" differs per employer)
+CREATE TABLE IF NOT EXISTS essays (
+  job_id INTEGER NOT NULL,
+  question_id TEXT NOT NULL,
+  label TEXT NOT NULL,
+  text TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',   -- pending | written
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (job_id, question_id)
+);
+
 CREATE TABLE IF NOT EXISTS accounts (
   ats TEXT NOT NULL,
   tenant TEXT NOT NULL,

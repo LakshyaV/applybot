@@ -322,9 +322,16 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict
             return finish(m.NEEDS_HUMAN, "not the standard Greenhouse form layout (embedded/legacy board)")
         questions += greenhouse.dom_only_questions(page, questions, row["company"])
         preset = greenhouse.preset_answers(questions, facts, str(ROOT / profile["resume_path"]))
+        on_form = {q.id for q in questions}
+        for essay in conn.execute("SELECT question_id, text FROM essays WHERE job_id = ? AND status = 'written'", (job_id,)):
+            if essay["question_id"] in on_form:
+                preset[essay["question_id"]] = essay["text"]
         result = rs.resolve(conn, questions, profile, ctx, preset)
         for q in result.misses:
             rs.record_miss(conn, q, job_id)
+        for q in result.essays:  # ask for exactly the essays this form requires
+            conn.execute("INSERT OR IGNORE INTO essays (job_id, question_id, label, created_at) VALUES (?,?,?,?)",
+                         (job_id, q.id, q.label, int(time.time())))  # fmt: skip
         (run_dir / "answers.json").write_text(json.dumps(result.answers, indent=1, ensure_ascii=False, default=str))
         if result.skip_job:
             return finish(m.SKIPPED_INELIGIBLE, "; ".join(f"{q.label[:60]} ({why})" for q, why in result.skip_job[:2]))
@@ -433,6 +440,57 @@ def run(limit: int = 5, headless: bool = False):
         finally:
             context.close()
     typer.echo(json.dumps({"mode": mode, "summary": dict(tally)}))
+
+
+PLACEHOLDER_RE = re.compile(r"\[[^\]]{2,40}\]|\{[a-z_ ]{2,30}\}|lorem ipsum|as an ai\b|language model", re.I)
+
+
+@app.command()
+def essays(limit: int = 10, as_json: bool = typer.Option(False, "--json")):
+    """Essays still to be written, each with the job context needed to write it truthfully."""
+    conn = db.connect()
+    rows = conn.execute(
+        "SELECT e.job_id, e.question_id, e.label, j.company, j.title FROM essays e JOIN jobs j ON j.id = e.job_id "
+        "WHERE e.status = 'pending' AND j.status IN (?, ?) ORDER BY j.priority, e.job_id LIMIT ?",
+        (m.NEEDS_ANSWERS, m.QUEUED, limit),
+    ).fetchall()
+    for r in rows:
+        schema_path = DATA_DIR / "runs" / str(r["job_id"]) / "schema.json"
+        meta = json.loads(schema_path.read_text())["meta"] if schema_path.exists() else {}
+        item = {"job_id": r["job_id"], "question_id": r["question_id"], "company": r["company"], "title": r["title"],
+                "question": r["label"], "job_description": (meta.get("description") or "")[:1800]}  # fmt: skip
+        typer.echo(json.dumps(item, ensure_ascii=False) if as_json else
+                   f"{r['job_id']:>6} {r['company'][:22]:<22} {r['title'][:34]:<34} :: {r['label'][:90]}")  # fmt: skip
+    if not rows:
+        typer.echo("no essays pending")
+
+
+@app.command("essays-import")
+def essays_import(path: str):
+    """Load written essays [{job_id, question_id, text}]. Each is also saved to data/runs/<job>/essays.md so the
+    user can read exactly what will be sent in their name."""
+    conn = db.connect()
+    ok, rejected = 0, []
+    for item in json.loads(open(path).read()):
+        text = (item.get("text") or "").strip()
+        row = conn.execute("SELECT label FROM essays WHERE job_id = ? AND question_id = ?",
+                           (item["job_id"], item["question_id"])).fetchone()  # fmt: skip
+        problem = ("no such pending essay" if row is None else "too short" if len(text) < 40 else
+                   "too long (keep under 1500 characters)" if len(text) > 1500 else
+                   "contains a placeholder or AI boilerplate" if PLACEHOLDER_RE.search(text) else "")  # fmt: skip
+        if problem:
+            rejected.append((item["job_id"], item["question_id"], problem))
+            continue
+        conn.execute("UPDATE essays SET text = ?, status = 'written' WHERE job_id = ? AND question_id = ?",
+                     (text, item["job_id"], item["question_id"]))  # fmt: skip
+        run_dir = DATA_DIR / "runs" / str(item["job_id"])
+        run_dir.mkdir(parents=True, exist_ok=True)
+        with (run_dir / "essays.md").open("a") as fh:
+            fh.write(f"### {row['label']}\n\n{text}\n\n")
+        ok += 1
+    typer.echo(f"imported={ok} rejected={len(rejected)}")
+    for job_id, question_id, why in rejected:
+        typer.echo(f"  job {job_id} / {question_id}: {why}")
 
 
 @app.command()
