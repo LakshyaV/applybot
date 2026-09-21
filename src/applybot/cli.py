@@ -619,6 +619,29 @@ def essays_import(path: str):
         typer.echo(f"  job {job_id} / {question_id}: {why}")
 
 
+@app.command("job-answer")
+def job_answer(job_id: int, label_prefix: str, value: str):
+    """A user-given answer for ONE job — for questions whose truthful answer differs per role ("do you have
+    experience in THIS role's discipline?"). It never enters the shared bank. The value must be one of the form's
+    own options when the question has options."""
+    conn = db.connect()
+    schema_path = DATA_DIR / "runs" / str(job_id) / "schema.json"
+    if not schema_path.exists():
+        raise typer.BadParameter("no saved schema for that job; dry-run it first")
+    matches = [q for q in json.loads(schema_path.read_text())["questions"] if q["label"].strip().startswith(label_prefix)]
+    if len(matches) != 1:
+        raise typer.BadParameter(f"label prefix matches {len(matches)} questions on that form")
+    q = matches[0]
+    if q["options"] and value not in q["options"]:
+        raise typer.BadParameter(f"{value!r} is not one of the form's options: {q['options']}")
+    conn.execute("INSERT OR REPLACE INTO essays (job_id, question_id, label, text, status, created_at) VALUES (?,?,?,?,?,?)",
+                 (job_id, q["id"], q["label"], value, "written", int(time.time())))  # fmt: skip
+    run_dir = DATA_DIR / "runs" / str(job_id)
+    with (run_dir / "essays.md").open("a") as fh:
+        fh.write(f"### {q['label']}\n\n{value}   _(answer given by the user for this job only)_\n\n")
+    typer.echo(f"job {job_id}: “{q['label'][:70]}” → {value}")
+
+
 @app.command()
 def requeue(statuses: str = "needs_answers,needs_input,needs_human,failed,dry_run_done", ats: str = "greenhouse"):
     """Put parked jobs back in the queue after the answer bank or profile changed. Never touches a job that

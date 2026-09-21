@@ -255,6 +255,9 @@ class Facts:
             "can_perform_essential_functions": avail.get("can_perform_essential_functions"),
             "french_proficient": p["identity"].get("french_proficient"),
             "attends_university_in_canada": ("canada" in (edu.get("location") or "").lower()) if edu.get("location") else None,
+            # "I understand that <employer> may use AI tools in its hiring process" — acknowledged for NAMED employers only.
+            "employer_ai_use_acknowledged": True if company and any(
+                normalize(c) in company for c in p["consents"].get("employer_ai_use_ack_companies", [])) else None,
             # The user's promise to follow an employer's interview-conduct policy (e.g. no unauthorized AI help in
             # interviews) — given for NAMED employers only.
             "interview_policy_acknowledged": True if company and any(

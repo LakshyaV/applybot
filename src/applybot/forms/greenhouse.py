@@ -302,7 +302,25 @@ def dom_only_questions(page, api_questions: list[Question], company: str) -> lis
     return extra
 
 
+def choose_multi(page, field_id: str, options: list[str]) -> None:
+    """Multi-select rendered as a dropdown (not a checkbox group): pick each option, then verify the whole set."""
+    box = page.locator(f'[id="{field_id}"]')
+    for option in options:
+        box.click()
+        box.fill(option[:30])
+        target = page.locator(MENU_OPTION).filter(has_text=re.compile(rf"^\s*{re.escape(option)}\s*$"))
+        target.first.wait_for(state="visible", timeout=10_000)
+        target.first.click()
+    box.press("Escape")
+    held = set(_committed(page, field_id).split(" | "))
+    if held != set(options):
+        raise FillError(f"{field_id}: wanted {sorted(options)} but the form holds {sorted(held)}")
+
+
 def _apply(page, field_id: str, value: object, kind: str) -> None:
+    if kind == "multiselect":
+        choose_multi(page, field_id, [str(v) for v in (value if isinstance(value, list) else [value])])
+        return
     if kind == "file":
         page.locator(f'[id="{field_id}"]').set_input_files(str(value))  # hidden input; never click "Attach"
         # the upload is asynchronous: the filename chip appears only once the server has accepted the file
@@ -354,7 +372,9 @@ def fill(page, questions: list[Question], answers: dict[str, object], facts) -> 
         dom = {f["id"]: f for f in dom_census(page)}
         progressed = False
         for field_id in list(pending):
-            if field_id.endswith("[]"):  # checkbox group: DOM ids are "<name>[]_<option id>"
+            if field_id.endswith("[]") and dom.get(field_id, {}).get("kind") == "select":
+                kind = "multiselect"  # the same API type can render as a multi-pick dropdown instead of checkboxes
+            elif field_id.endswith("[]"):  # checkbox group: DOM ids are "<name>[]_<option id>"
                 kind = "checkbox" if any(d.startswith(field_id) for d in dom) else None
             else:
                 kind = dom.get(field_id, {}).get("kind")
