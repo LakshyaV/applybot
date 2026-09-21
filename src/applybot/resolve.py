@@ -428,7 +428,9 @@ def resolve(conn: sqlite3.Connection, questions: list[Question], profile: dict, 
             if not q.required:
                 continue  # voluntary and no decline option offered → leave blank
         hit = bank_get(conn, q)
-        if hit is None or (is_high_stakes(q) and not hit[1]):
+        # "human" and "skip" assert nothing on the user's behalf, so they need no clearance.
+        asserts = hit is not None and hit[0]["kind"] not in ("human", "skip")
+        if hit is None or (is_high_stakes(q) and asserts and not hit[1]):
             if q.required or hit is not None or is_high_stakes(q):
                 out.misses.append(q)
             continue  # unknown optional low-stakes questions are left blank
@@ -488,7 +490,7 @@ def _apply(q: Question, res: dict, facts: Facts):
         return res["option"]
     value = facts.get(effective_fact(q.label, res["fact"]))
     if kind == "fact_text":
-        return str(value)
+        return {True: "Yes", False: "No"}.get(value, str(value)) if isinstance(value, bool) else str(value)
     if kind == "fact_checkbox":
         if value is not True and q.required:
             raise Unknown(f"{res['fact']} is not true, so a required checkbox cannot be ticked")

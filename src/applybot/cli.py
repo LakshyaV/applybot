@@ -252,18 +252,22 @@ def answers_import(path: str, origin: str = "llm", replace: bool = typer.Option(
 @app.command()
 def approvals(
     approve: list[str] = typer.Option([], help="qhash to clear (repeatable)"),
+    approve_file: str = typer.Option("", help="File of qhashes to clear, one per line"),
     tier: str = typer.Option("critical", help="critical = cleared by the USER only · verify = cleared by the verifier pass"),
     as_json: bool = typer.Option(False, "--json"),
 ):
     """Bank entries awaiting clearance, phrased as the claim the form will make on the user's behalf."""
     level = {"critical": rs.CRITICAL, "verify": rs.VERIFY}[tier]
     conn = db.connect()
+    if approve_file:  # one hash (or unique prefix) per line — lets the USER clear a list an agent has reviewed
+        approve = [*approve, *(line.strip() for line in open(approve_file) if line.strip())]
     for qhash in approve:
-        row = conn.execute("SELECT * FROM answer_bank WHERE qhash = ? AND high_stakes = ? AND approved = 0",
-                           (qhash, level)).fetchone()  # fmt: skip
-        if row is None:
-            typer.echo(f"  {qhash}: not an uncleared {tier} entry — skipped")
+        found = conn.execute("SELECT * FROM answer_bank WHERE qhash LIKE ? AND high_stakes = ? AND approved = 0",
+                             (qhash + "%", level)).fetchall()  # fmt: skip
+        if len(found) != 1:
+            typer.echo(f"  {qhash}: matches {len(found)} uncleared {tier} entries — skipped")
             continue
+        row, qhash = found[0], found[0]["qhash"]
         conn.execute("UPDATE answer_bank SET approved = 1, origin = origin || ? WHERE qhash = ?", (f"+{tier}", qhash))
         if level == rs.CRITICAL:  # audit trail the user can skim and veto
             q = rs.Question("", row["label"], row["field_type"], True, json.loads(row["options"]))
