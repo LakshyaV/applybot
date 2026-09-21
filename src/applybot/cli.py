@@ -15,7 +15,7 @@ from . import models as m
 from .config import DATA_DIR, ROOT, load_config, load_profile
 from .forms import greenhouse
 from .normalize import is_tracker
-from .sources import github_repo
+from .sources import boards, github_repo
 
 GENERIC_OPTION_RE = (r"bachelor|undergrad|software|computer|engineering|english|other|none|not applicable|n/a|"
                      r"prefer not|decline|job board|github|online")
@@ -96,6 +96,70 @@ def ingest_repo(
     typer.echo(f"newly queued: {report['newly_queued']}  by ATS: {report['queued_by_ats']}")
     if reasons:
         typer.echo("not queued: " + "; ".join(f"{k} ×{v}" for k, v in reasons.most_common(8)))
+
+
+@app.command()
+def discover(
+    curated_only: bool = typer.Option(False, help="Poll only the boards in sources/companies.yaml"),
+    as_json: bool = typer.Option(False, "--json"),
+):
+    """Poll companies' own public job boards (Greenhouse, Ashby, Lever) for intern roles (idempotent)."""
+    cfg = load_config()
+    conn = db.connect()
+    targets: dict[tuple[str, str], str | None] = {}
+    if not curated_only:
+        rows = conn.execute(
+            f"SELECT ats, lower(board) AS board, MAX(company) AS company FROM jobs WHERE board != '' "
+            f"AND ats IN ({','.join('?' * len(boards.POLLED))}) GROUP BY ats, lower(board)", boards.POLLED
+        )  # fmt: skip
+        targets.update({(r["ats"], r["board"]): r["company"] for r in rows})
+    curated = boards.curated_boards()
+    targets.update(curated)
+    jobs, missing, errored = boards.poll(targets, cfg["target"]["season"])
+
+    def wanted(company: str, title: str, category: str) -> bool:
+        """A bare "Engineering Intern" is a software role at a company on the user's lists, and civil or
+        mechanical work at an unknown firm — so without a software/ML/quant word the company has to be listed."""
+        if category not in cfg["discovery_categories"] or not boards.is_target_title(title):
+            return False
+        return bool(boards.STRONG_RE.search(title)) or filters.company_bonus(company, cfg) > 0
+
+    # board rows tracked before the filter was tightened: withdraw the ones it no longer accepts
+    for row in conn.execute("SELECT id, company, title, category FROM jobs WHERE source LIKE 'board:%' AND (status = ? OR "
+                            "(status = ? AND reason = 'over per_company_cap'))", (m.QUEUED, m.DISCOVERED)).fetchall():  # fmt: skip
+        if not wanted(row["company"], row["title"], row["category"]):
+            db.set_status(conn, row["id"], m.DISCOVERED, "outside discovery filter")
+
+    outcomes, queued, reasons = Counter(), Counter(), Counter()
+    for job in jobs:
+        status_, reason = filters.eligibility(job, cfg)
+        if status_ == m.QUEUED and not wanted(job.company, job.title, job.category):
+            status_, reason = m.DISCOVERED, "outside discovery filter"
+        outcome = db.upsert_job(conn, job, status_, reason, filters.priority(job, cfg))
+        outcomes[outcome] += 1
+        if outcome == "new":
+            if status_ == m.QUEUED:
+                queued[f"{job.company} [{job.ats}]"] += 1
+            else:
+                reasons[f"{status_}: {reason.split(' [')[0][:40]}"] += 1
+    capped = _apply_company_cap(conn, cfg.get("per_company_cap"))
+    report = {
+        "boards": len(targets), "missing_curated": [b for b in missing if tuple(b.split(":", 1)) in curated],
+        "missing_other": len([b for b in missing if tuple(b.split(":", 1)) not in curated]), "errored": errored[:20],
+        "intern_rows": len(jobs), **outcomes, "newly_queued": sum(queued.values()) - capped,
+        "queued": dict(queued.most_common()), "not_queued": dict(reasons.most_common(8)),
+    }  # fmt: skip
+    if as_json:
+        typer.echo(json.dumps(report))
+        return
+    typer.echo(f"boards={report['boards']}  intern rows={len(jobs)}  new={outcomes['new']}  seen={outcomes['seen']}  "
+               f"duplicate={outcomes['duplicate']}  newly queued={report['newly_queued']}")  # fmt: skip
+    typer.echo("queued: " + "; ".join(f"{k} ×{v}" for k, v in queued.most_common(60)))
+    if reasons:
+        typer.echo("not queued: " + "; ".join(f"{k} ×{v}" for k, v in reasons.most_common(8)))
+    typer.echo(f"curated boards not found: {', '.join(report['missing_curated']) or 'none'}")
+    if errored:
+        typer.echo(f"errored: {', '.join(errored[:20])}")
 
 
 @app.command()

@@ -48,6 +48,14 @@ def is_priority_company(company: str, cfg: dict) -> bool:
     return _company_in(company, cfg.get("priority_companies"))
 
 
+def company_bonus(company: str, cfg: dict) -> int:
+    """Best bonus among `priority_companies` and the `company_tiers` the company appears in (0 if none)."""
+    bonuses = [tier.get("bonus", 0) for tier in cfg.get("company_tiers") or [] if _company_in(company, tier.get("companies"))]
+    if is_priority_company(company, cfg):
+        bonuses.append(cfg.get("priority_company_bonus", 0))
+    return max(bonuses, default=0)
+
+
 def eligibility(job: m.Job, cfg: dict) -> tuple[str, str]:
     """Return (status, reason). status is QUEUED when the job should be applied to."""
     target = cfg["target"]["season"]
@@ -95,6 +103,4 @@ def priority(job: m.Job, cfg: dict) -> int:
         score += cfg["eligibility"]["no_sponsorship_penalty"] * 10
     if job.sponsorship == m.SPONSOR_OFFERS:
         score -= 3
-    if is_priority_company(job.company, cfg):
-        score -= cfg.get("priority_company_bonus", 0)
-    return score
+    return score - company_bonus(job.company, cfg)
