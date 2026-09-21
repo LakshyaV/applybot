@@ -212,7 +212,15 @@ def dom_only_questions(page, api_questions: list[Question], company: str) -> lis
         # a REQUIRED lone checkbox is a consent/attestation the API schema never mentions → it must be a question
         if f["id"] in DOM_TYPEAHEAD_PRESETS or f["id"] in DOM_TEXT_PRESETS or f["id"] == LOCATION_FIELD:
             continue  # answered from the profile by fixed id
-        options = read_options(page, f["id"]) if f["kind"] == "select" else []
+        options: list[str] = []
+        if f["kind"] == "select":
+            for _attempt in range(3):  # option lists render lazily; an empty read is "not loaded yet", not "no options"
+                options = read_options(page, f["id"])
+                if options:
+                    break
+                page.wait_for_timeout(1_500)
+            if not options:
+                raise FillError(f"{f['id']}: dropdown options never loaded ({f['label'][:40]!r})")  # retryable
         extra.append(Question(f["id"], f["label"], f["kind"], f["required"], options, company=company))
     return extra
 
@@ -320,39 +328,66 @@ def readback(page, answers: dict[str, object]) -> dict:
 # (never retried) rather than guess.
 
 CONFIRMED, NEEDS_CODE, INVALID, CHALLENGE, UNKNOWN = "confirmed", "needs_code", "invalid", "challenge", "unknown"
-CONFIRM_TEXT_RE = re.compile(r"thank you for applying|application (has been |was )?(submitted|received)|"
-                             r"we('ve| have) received your application", re.I)  # fmt: skip
+# Employers customize this page (Robinhood: "Thank you for your interest… We will review your application"),
+# so the /confirmation URL is the primary signal and this text is the backup.
+CONFIRM_TEXT_RE = re.compile(r"thank you for (applying|your interest|your application)|"
+                             r"application (has been |was )?(submitted|received)|"
+                             r"we('ve| have) received your application|we will review your application", re.I)  # fmt: skip
 SECURITY_INPUT = '[id^="security-input-"]'
 ERROR_SELECTOR = '[aria-invalid="true"], .helper-text--error, [id$="-error"]'
 CHALLENGE_SELECTOR = 'iframe[src*="recaptcha/api2/bframe"], iframe[src*="hcaptcha.com"], iframe[title*="challenge" i]'
 
 
-def _classify(page) -> str:
-    if page.locator(SECURITY_INPUT).count():
-        return NEEDS_CODE
-    if "/confirmation" in page.url or CONFIRM_TEXT_RE.search(page.locator("body").inner_text()[:4000]):
-        return CONFIRMED
+def _visible_error(page) -> str:
+    """Text of a VISIBLE validation message. Empty error containers exist on healthy forms, so mere presence
+    of a matching element proves nothing."""
+    for el in page.locator(ERROR_SELECTOR).all():
+        try:
+            if el.is_visible() and (text := el.inner_text().strip()):
+                return text[:120]
+        except Exception:  # noqa: BLE001 — element detached mid-check
+            continue
+    return ""
+
+
+def _classify(page, statuses: list[int]) -> tuple[str, str]:
+    if page.locator(SECURITY_INPUT).count() or 428 in statuses:
+        return NEEDS_CODE, ""
+    if "/confirmation" in page.url:
+        return CONFIRMED, ""
+    # Text alone is not proof: job descriptions say things like "thank you for your interest". It only counts once
+    # the application form itself is gone from the page. A false "confirmed" is the worst error this tool can make.
+    form_gone = page.locator("form #first_name, form #email").count() == 0
+    if form_gone and CONFIRM_TEXT_RE.search(page.locator("body").inner_text()[:4000]):
+        return CONFIRMED, ""
     for frame in page.locator(CHALLENGE_SELECTOR).all():
         if frame.is_visible():
-            return CHALLENGE
-    if page.locator(ERROR_SELECTOR).count():
-        return INVALID
-    return UNKNOWN
+            return CHALLENGE, ""
+    # INVALID means "nothing was sent, a retry is safe" — so it needs positive proof: a visible message AND
+    # no application POST that the server accepted. Anything less stays UNKNOWN (→ verify, never retried).
+    error = _visible_error(page)
+    if error and not any(s < 400 for s in statuses):
+        return INVALID, error
+    return UNKNOWN, ""
 
 
-def submit(page, wait_ms: int = 25_000) -> tuple[str, str]:
+def submit(page, wait_ms: int = 30_000, after_code: bool = False) -> tuple[str, str]:
     """Click submit exactly once and classify what happened. → (outcome, detail)."""
     statuses: list[int] = []
     page.on("response", lambda r: statuses.append(r.status) if r.request.method == "POST" and "greenhouse" in r.url else None)
-    page.get_by_role("button", name=re.compile(r"^submit application$", re.I)).click()
-    waited, outcome = 0, UNKNOWN
+    buttons = page.get_by_role("button", name=re.compile(r"submit", re.I))
+    # after a security code is entered Greenhouse shows a second submit button beneath the code boxes
+    (buttons.last if after_code else buttons.first).click()
+    waited, outcome, note = 0, UNKNOWN, ""
     while waited < wait_ms:
         page.wait_for_timeout(500)
         waited += 500
-        outcome = _classify(page)
+        if waited < 2_000:
+            continue  # give the request time to leave before judging anything
+        outcome, note = _classify(page, statuses)
         if outcome != UNKNOWN:
             break
-    return outcome, f"POST statuses={statuses[-3:]} url={page.url}"
+    return outcome, f"{note} POST statuses={statuses[-4:]} url={page.url}".strip()
 
 
 def enter_security_code(page, code: str) -> tuple[str, str]:
@@ -362,4 +397,4 @@ def enter_security_code(page, code: str) -> tuple[str, str]:
         return UNKNOWN, f"expected {boxes.count()} characters, got {len(code)}"
     for i, char in enumerate(code):
         boxes.nth(i).fill(char)
-    return submit(page)
+    return submit(page, after_code=True)

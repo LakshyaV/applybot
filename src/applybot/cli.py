@@ -370,7 +370,13 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict
         if outcome == greenhouse.NEEDS_CODE:
             typer.echo(json.dumps({**summary, "event": "needs_code", "hint": f"uv run applybot code {job_id} <8-char code from email>"}))
             code = _wait_for_code(conn, job_id, timeout_s=600)
-            outcome, detail = greenhouse.enter_security_code(page, code) if code else (greenhouse.UNKNOWN, "no code within 10 min")
+            if not code:
+                # Greenhouse answered 428 and no code was ever entered, so the application was NOT accepted.
+                # That is positively known, which makes a later retry safe (unlike an unidentified outcome).
+                conn.execute("UPDATE applications SET finished_at = ?, outcome = 'code_not_provided' WHERE id = ?",
+                             (int(time.time()), application_id))  # fmt: skip
+                return finish(m.NEEDS_HUMAN, "verification code not provided within 10 min; Greenhouse did not accept the application")
+            outcome, detail = greenhouse.enter_security_code(page, code)
         page.screenshot(path=str(run_dir / "after_submit.png"), full_page=True)
         final = {greenhouse.CONFIRMED: m.SUBMITTED, greenhouse.INVALID: m.FAILED,
                  greenhouse.CHALLENGE: m.NEEDS_HUMAN}.get(outcome, m.VERIFY)  # fmt: skip
@@ -449,6 +455,7 @@ def run(limit: int = 5, headless: bool = False, jobs: str = typer.Option("", hel
                     "AND ats = 'greenhouse' RETURNING *",
                     (m.IN_PROGRESS, int(time.time()) + db.LEASE_SECONDS, f"run-{os.getpid()}", *ids, m.QUEUED),
                 ).fetchall()
+                claimed.sort(key=lambda r: ids.index(r["id"]))  # run them in the order they were asked for
             else:
                 claimed = db.claim(conn, limit, f"run-{os.getpid()}", ["greenhouse"])
             for row in claimed:
