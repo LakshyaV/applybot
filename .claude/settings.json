@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run applybot:*)",
+      "Bash(uv run pytest:*)"
+    ],
+    "deny": [
+      "Read(./.env)"
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+| Company | Position | Location | Salary | Posting | Age |
+|---|---|---|---|---|---|
+| <a href="https://www.microsoft.com"><strong>Microsoft</strong></a> | Software Engineering Internship - 6-month Program | California, MD +1 | $52/hr | <a href="https://apply.careers.microsoft.com/careers/job/1970393556982258"><img src="https://i.imgur.com/JpkfjIq.png" alt="Apply" width="70"/></a> | 2d |
+| <a href="https://www.doordash.com"><strong>DoorDash</strong></a> | Software Engineer - Intern - Summer 2027 - US | San Francisco, CA +4 | $55/hr | <a href="https://job-boards.greenhouse.io/doordashusa/jobs/8171041"><img src="https://i.imgur.com/JpkfjIq.png" alt="Apply" width="70"/></a> | 5d |
+| <a href="https://www.figma.com"><strong>Figma</strong></a> | Software Engineer Intern - Summer 2027 | San Francisco, CA +1 | $60/hr | <a href="https://boards.greenhouse.io/figma/jobs/6143238004?gh_jid=6143238004"><img src="https://i.imgur.com/JpkfjIq.png" alt="Apply" width="70"/></a> | 5d |
+| <a href="https://www.lyft.com"><strong>Lyft</strong></a> | Software Engineer Intern - Backend - Summer 2027 - SF | San Francisco, CA | $58/hr | <a href="https://app.careerpuck.com/job-board/lyft/job/8767726002?gh_jid=8767726002"><img src="https://i.imgur.com/JpkfjIq.png" alt="Apply" width="70"/></a> | 8d |

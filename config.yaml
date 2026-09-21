@@ -1,0 +1,69 @@
+# applybot configuration. Personal facts live in profile/profile.md, not here.
+
+# dry_run    : fill + screenshot, never submit
+# supervised : real submits, concurrency 1, stops after `supervised_limit`
+# auto       : unattended
+# fill_only  : fill and park the window; the human clicks Submit
+mode: dry_run
+supervised_limit: 10
+
+target:
+  season: "Summer 2027"
+  # evergreen postings list many terms; above this count they are ranked last
+  evergreen_terms_threshold: 4
+
+# Lower number = applied to first. Repo mode applies to every eligible row in this order;
+# /find-jobs mode only keeps categories listed in `discovery_categories`.
+category_priority:
+  "Software": 0
+  "AI/ML/Data": 0
+  "Quant": 1
+  "Hardware": 2
+  "Product": 3
+  "Other": 3
+discovery_categories: ["Software", "AI/ML/Data", "Quant"]
+
+# Country priority (work authorization is answered truthfully per country; see profile.md)
+country_priority:
+  CA: 0
+  US: 0
+  REMOTE: 0
+  UNKNOWN: 1
+  OTHER: 2
+
+eligibility:
+  skip_citizenship_required: true     # 🇺🇸 / "U.S. Citizenship is Required" / clearance
+  skip_advanced_degree_only: true     # 🎓 Master's/PhD-only postings
+  apply_no_sponsorship: true          # 🛂 rows are still applied to, ranked last
+  no_sponsorship_penalty: 5
+
+# null = no cap ("apply to every position"). A number keeps the N best-ranked roles per company.
+per_company_cap: null
+
+# user      : every new high-stakes question mapping is approved by the human once
+# dual_pass : two independent LLM passes + deterministic polarity check must agree
+high_stakes_approval: user
+
+pacing:
+  fill_concurrency: 3
+  submit_min_interval_seconds: 45     # per ATS host
+  daily_submit_cap: 150
+  breaker_428_rate: 0.5               # over the last 10 Greenhouse submits → halve pace
+
+sources:
+  repos:
+    - https://github.com/SimplifyJobs/Summer2027-Internships
+    - https://github.com/vanshb03/Summer2027-Internships
+    - https://github.com/speedyapply/2027-SWE-College-Jobs
+    - https://github.com/speedyapply/2027-AI-College-Jobs
+    - https://github.com/negarprh/Canadian-Tech-Internships-2027
+    - https://github.com/zapplyjobs/Internships-2027
+    - https://github.com/northwesternfintech/2027QuantInternships
+
+# Never automated (ToS / account-ban risk). URLs on these hosts go to the human lane.
+blocked_hosts:
+  - linkedin.com
+  - indeed.com
+  - glassdoor.com
+  - joinhandshake.com
+  - workatastartup.com

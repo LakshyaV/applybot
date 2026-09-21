@@ -1,0 +1,12 @@
+# secrets + personal data never leave this machine
+.env
+profile/
+data/
+*.pdf
+
+# tooling
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.pw-output/
