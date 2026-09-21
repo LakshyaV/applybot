@@ -190,6 +190,53 @@ def _flag_iso(scope) -> str:
 
 LOCATION_FIELD = "candidate-location"  # "Location (City)": a geocoder typeahead that also fills hidden lat/long
 
+# The employment block reuses the education block's labels ("Start date month", "End date year"…). Matching by
+# label once put a university start date into an employment row, so these ids are NEVER answered by the label
+# bank — only by fill_employment(), from the structured work history in the profile.
+EMPLOYMENT_ID_RE = re.compile(r"^(company-name|title|start-date-month|start-date-year|end-date-month|end-date-year|current-role)-\d+")
+MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October",
+               "November", "December"]  # fmt: skip
+_CLICK_EMPLOYMENT_ADD = """() => {
+  const rows = [...document.querySelectorAll('input[id^="company-name-"]')];
+  const last = rows[rows.length - 1];
+  const button = [...document.querySelectorAll('form button')].find(b => /add another/i.test(b.innerText) &&
+      (last.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING));
+  if (!button) return false;
+  button.click();
+  return true;
+}"""
+
+
+def fill_employment(page, experience: list[dict], answers: dict[str, object]) -> int:
+    """Enter up to three roles. Every value is also recorded in `answers` so readback verifies it."""
+    done = 0
+    for i, role in enumerate(experience[:3]):
+        if not page.locator(f'[id="company-name-{i}"]').count():
+            if i == 0 or not page.evaluate(_CLICK_EMPLOYMENT_ADD):
+                break
+            try:
+                page.locator(f'[id="company-name-{i}"]').wait_for(state="visible", timeout=5_000)
+            except Exception:  # noqa: BLE001 — a form that allows only one row
+                break
+        values = {f"company-name-{i}": role["company"], f"title-{i}": role["title"],
+                  f"start-date-year-{i}": role["start"][:4]}  # fmt: skip
+        for field_id, value in values.items():
+            page.locator(f'[id="{field_id}"]').fill(value)
+        choose(page, f"start-date-month-{i}", MONTH_NAMES[int(role["start"][5:7]) - 1])
+        values[f"start-date-month-{i}"] = MONTH_NAMES[int(role["start"][5:7]) - 1]
+        if role.get("end"):
+            choose(page, f"end-date-month-{i}", MONTH_NAMES[int(role["end"][5:7]) - 1])
+            page.locator(f'[id="end-date-year-{i}"]').fill(role["end"][:4])
+            values[f"end-date-month-{i}"] = MONTH_NAMES[int(role["end"][5:7]) - 1]
+            values[f"end-date-year-{i}"] = role["end"][:4]
+        else:
+            current = page.locator(f'input[type="checkbox"][id^="current-role-{i}"]')
+            if current.count():
+                current.first.check()
+        answers.update(values)
+        done += 1
+    return done
+
 
 def choose_location(page, field_id: str, city: str, region: str, country: str) -> None:
     """Type the applicant's own city and pick the geocoder suggestion naming that city AND country (and the
@@ -240,6 +287,8 @@ def dom_only_questions(page, api_questions: list[Question], company: str) -> lis
         # a REQUIRED lone checkbox is a consent/attestation the API schema never mentions → it must be a question
         if f["id"] in DOM_TYPEAHEAD_PRESETS or f["id"] in DOM_TEXT_PRESETS or f["id"] == LOCATION_FIELD:
             continue  # answered from the profile by fixed id
+        if EMPLOYMENT_ID_RE.match(f["id"]):
+            continue  # work-history rows: filled only by fill_employment(), never by label
         options: list[str] = []
         if f["kind"] == "select":
             for _attempt in range(3):  # option lists render lazily; an empty read is "not loaded yet", not "no options"
@@ -293,8 +342,14 @@ def fill(page, questions: list[Question], answers: dict[str, object], facts) -> 
     if LOCATION_FIELD in dom:
         choose_location(page, LOCATION_FIELD, str(facts.get("city")), str(facts.get("province_state")),
                         str(facts.get("country_of_residence")))  # fmt: skip
+    for stale in [k for k in answers if EMPLOYMENT_ID_RE.match(k)]:
+        del answers[stale]  # belt and braces: a label-matched value must never reach a work-history row
+    employment_rows = 0
+    if "company-name-0" in dom and facts.p.get("experience"):
+        employment_rows = fill_employment(page, facts.p["experience"], answers)
+    handled = {k for k in answers if EMPLOYMENT_ID_RE.match(k)}
 
-    pending = {k: v for k, v in answers.items() if v is not None}
+    pending = {k: v for k, v in answers.items() if v is not None and k not in handled}
     for _ in range(4):
         dom = {f["id"]: f for f in dom_census(page)}
         progressed = False
@@ -311,6 +366,7 @@ def fill(page, questions: list[Question], answers: dict[str, object], facts) -> 
             break
     report = readback(page, answers)
     report["not_on_form"] = sorted(pending)
+    report["employment_rows"] = employment_rows
     return report
 
 

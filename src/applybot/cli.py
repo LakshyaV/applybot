@@ -309,6 +309,8 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict
         questions, meta = greenhouse.parse(greenhouse.fetch(row["board"], row["ats_job_id"]))
     except greenhouse.Gone:
         return finish(m.CLOSED, "posting removed (ATS API 404)")
+    except Exception as err:  # noqa: BLE001 — a network dropout must cost one form, not the whole batch
+        return finish(m.FAILED, f"could not load the form schema ({type(err).__name__}); nothing was filled or sent")
     countries = meta["countries"] if meta["countries"] != ["UNKNOWN"] else json.loads(row["countries"])
     blocked, reason = preflight.check(meta["description"], countries)
     if blocked:
