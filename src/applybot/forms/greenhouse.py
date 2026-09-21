@@ -268,6 +268,7 @@ def dom_census(page) -> list[dict]:
              kind: el.type === 'file' ? 'file' : el.type === 'checkbox' ? 'checkbox'
                  : el.getAttribute('role') === 'combobox' ? 'select' : el.tagName === 'TEXTAREA' ? 'textarea' : 'text',
              required: el.getAttribute('aria-required') === 'true' || el.required,
+             disabled: el.disabled,
              maxlength: el.maxLength > 0 ? el.maxLength : null,
              label: (document.querySelector(`label[for="${CSS.escape(el.id)}"]`)?.innerText || '').replace(/\\*\\s*$/, '').trim(),
           }))"""
@@ -404,7 +405,8 @@ def readback(page, answers: dict[str, object]) -> dict:
         else:
             current = loc.input_value()
         held[f["id"]] = current
-        if f["required"] and current in ("", False):
+        # a control the form itself has disabled (end date of a "Current role") cannot be filled and is not sent
+        if f["required"] and current in ("", False) and not f.get("disabled"):
             empty_required.append(f["id"])
     # Greenhouse replaces the file <input> after an upload, so an attachment is verified by its filename chip.
     for field_id, value in answers.items():
