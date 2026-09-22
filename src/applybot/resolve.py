@@ -307,6 +307,7 @@ class Facts:
             "acknowledge_privacy_notice": True if p["consents"].get("agent_may_acknowledge_privacy_notice") else None,
             "sms_opt_in": p["consents"].get("sms_marketing_opt_in"),
             "talent_community_opt_in": p["consents"].get("talent_community_opt_in"),
+            "sms_updates_opt_in": p["consents"].get("sms_updates_opt_in", False),  # text-message updates: off unless the user opts in
             "today": date.today().isoformat(),
         }  # fmt: skip
 

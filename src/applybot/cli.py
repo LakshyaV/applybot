@@ -386,8 +386,6 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict
     blocked, reason = preflight.check(meta["description"], countries)
     if blocked:
         return finish(blocked, reason)
-    if meta.get("employment_type") and meta["employment_type"].lower() not in ("intern", "internship", "contract", "temporary"):
-        return finish(m.SKIPPED_INELIGIBLE, f"posting is {meta['employment_type']}, not an internship")
     ctx = rs.JobContext(row["company"], countries)
     facts = rs.Facts(profile, ctx)
     for q in questions:

@@ -16,6 +16,15 @@ TECH_RE = re.compile(
     re.I,
 )
 SEASON_RE = re.compile(r"\b(winter|spring|summer|fall|autumn)\s*(?:of\s*)?['’]?(20\d{2}|\d{2})\b", re.I)
+# "January - August 2027": a dated term that starts outside the summer window is not a summer internship
+MONTH_RANGE_RE = re.compile(
+    r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s*(?:-|–|—|to|through)\s*"
+    r"(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?,?\s*(20\d{2})\b",
+    re.I,
+)
+# "… - January 2027" with no end month: the term starts then
+MONTH_START_RE = re.compile(r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(20\d{2})\b", re.I)
+SUMMER_START_MONTHS = {"may", "jun", "jul"}
 ADVANCED_RE = re.compile(r"\b(ph\.?d|doctoral|master'?s|\bms\b|mba|graduate student)\b", re.I)
 UNDERGRAD_RE = re.compile(r"\b(undergrad\w*|bachelor'?s?|\bbs\b|\bba\b)\b", re.I)
 
@@ -71,6 +80,9 @@ def eligibility(job: m.Job, cfg: dict) -> tuple[str, str]:
     titled = seasons_in_title(job.title)
     if titled and target not in titled:
         return m.OFF_SEASON, f"title says {', '.join(sorted(titled))}"
+    dated = MONTH_RANGE_RE.search(job.title) or MONTH_START_RE.search(job.title)
+    if dated and dated.group(1).lower()[:3] not in SUMMER_START_MONTHS:
+        return m.OFF_SEASON, f"title says {dated.group(0)}"
     if job.terms and target not in job.terms and not (titled and target in titled):
         return m.OFF_SEASON, f"terms {job.terms}"
 

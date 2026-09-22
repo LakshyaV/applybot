@@ -91,3 +91,12 @@ def test_curated_file_parses():
     curated = boards.curated_boards()
     assert curated[("greenhouse", "anthropic")] == "Anthropic"
     assert all(ats in boards.POLLED for ats, _ in curated)
+
+
+def test_dated_non_summer_term_in_title_is_off_season():
+    job = m.Job(company="Acme", title="Software Engineering Intern - Vehicle Controls (January - August 2027)",
+                url="https://x.test/2", terms=["Summer 2027"], countries=["US"])  # fmt: skip
+    assert filters.eligibility(job, CFG)[0] == m.OFF_SEASON
+    summer = m.Job(company="Acme", title="Software Engineering Intern (May - August 2027)", url="https://x.test/3",
+                   terms=["Summer 2027"], countries=["US"])  # fmt: skip
+    assert filters.eligibility(summer, CFG)[0] == m.QUEUED

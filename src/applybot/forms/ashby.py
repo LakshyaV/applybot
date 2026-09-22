@@ -133,6 +133,8 @@ def _kind(entry) -> str:
         return "date"
     if entry.locator("input[type=file]").count():
         return "file"
+    if entry.locator("> input.ashby-application-form-input-text, > textarea").count():
+        return "textarea" if entry.locator("> textarea").count() else "text"  # a phone entry may also hold an SMS-consent radio group
     if entry.locator(".ashby-application-form-input-yesno").count():
         return "yesno"
     if entry.locator("input[type=radio]").count():
@@ -158,14 +160,17 @@ def _held(entry, kind: str) -> object:
     if kind == "checkbox":
         return sorted(b.get_attribute("name") or "" for b in entry.locator("input[type=checkbox]:checked").all())
     if kind == "file":
-        # Ashby swaps the input for a filename chip once the upload is accepted
-        text = entry.inner_text()
-        m_ = re.search(r"[\w\-. ]+\.(pdf|docx?)", text, re.I)
-        return m_.group(0).strip() if m_ else ""
+        # Ashby shows a filename chip inside the entry once the upload is accepted (briefly absent while re-rendering)
+        for _ in range(10):
+            m_ = re.search(r"[\w\-. ]+\.(pdf|docx?)", entry.text_content() or "", re.I)
+            if m_:
+                return m_.group(0).strip()
+            entry.page.wait_for_timeout(500)
+        return ""
     if kind == "autocomplete":
         return entry.locator("input[role=combobox]").input_value()
     if kind in ("text", "textarea", "date"):
-        return entry.locator("input, textarea").first.input_value()
+        return entry.locator("> input, > textarea, input.ashby-application-form-input-text, textarea").first.input_value()
     return ""
 
 
@@ -208,11 +213,23 @@ def _apply(page, path: str, value: object, kind: str) -> None:
     elif kind == "date":
         fill_date(entry, str(value))
     else:
-        box = entry.locator("input, textarea").first
+        box = entry.locator("> input, > textarea, input.ashby-application-form-input-text, textarea").first
         limit = box.evaluate("el => el.maxLength > 0 ? el.maxLength : null")
         if limit and len(str(value)) > limit:
             raise FillError(f"{path}: answer is {len(str(value))} characters but the field allows {limit}")
         box.fill(str(value))
+
+
+def texting_consent(entry, facts) -> None:
+    """Some employers attach "may we text you?" radios to the phone field. Consent is given only when the profile
+    says so; otherwise the applicant declines (a decline asserts nothing)."""
+    if not entry.locator("input[type=radio][name=communicationConsent]").count():
+        return
+    wanted = "given" if facts.get("sms_updates_opt_in") is True else "notGiven"
+    radio = entry.locator(f'input[type=radio][name=communicationConsent][value="{wanted}"]')
+    radio.locator("xpath=..").click()  # the native input is visually hidden under its styled label
+    if not radio.is_checked():
+        raise FillError("texting consent did not commit")
 
 
 def choose_location(page, entry, location: str) -> None:
@@ -258,6 +275,8 @@ def dom_census(page) -> list[dict]:
     """Every field entry actually rendered: path, kind, required, label."""
     out = []
     for entry in page.locator(ALL_ENTRIES).all():
+        if not entry.is_visible():
+            continue  # conditional entries stay mounted but hidden until their trigger is answered
         label = entry.locator("label.ashby-application-form-question-title").first
         path = entry.get_attribute("data-field-path") or (label.get_attribute("for") if label.count() else "") or ""
         if not path:
@@ -265,9 +284,32 @@ def dom_census(page) -> list[dict]:
         out.append({
             "id": path, "kind": _kind(entry),
             "required": bool(entry.locator("label.ashby-application-form-question-title[class*=required]").count()),
-            "label": label.inner_text().strip() if label.count() else "",
+            "label": (label.text_content() or "").strip() if label.count() else "",
         })  # fmt: skip
     return out
+
+
+def dom_only_questions(page, api_questions: list[Question], company: str) -> list[Question]:
+    """Entries rendered on the form that the schema did not list (conditional or employer-injected fields), as
+    Questions so they go through the resolver instead of surfacing as unexplained empty required fields."""
+    known = {q.id for q in api_questions}
+    extra = []
+    for f in dom_census(page):
+        if f["id"] in known or not f["label"]:
+            continue
+        entry = _entry(page, f["id"])
+        options = []
+        if f["kind"] == "radio":
+            options = [(page.locator(f'label[for="{r.get_attribute("id")}"]').text_content() or "").strip()
+                       for r in entry.locator("input[type=radio]").all()]  # fmt: skip
+        elif f["kind"] == "checkbox":
+            options = [b.get_attribute("name") or "" for b in entry.locator("input[type=checkbox]").all()]
+        elif f["kind"] == "yesno":
+            options = ["Yes", "No"]
+        qtype = {"radio": "select", "yesno": "select", "checkbox": "multiselect", "textarea": "textarea",
+                 "file": "file"}.get(f["kind"], "text")  # fmt: skip
+        extra.append(Question(id=f["id"], label=f["label"], type=qtype, required=f["required"], options=options, company=company))
+    return extra
 
 
 def fill(page, questions: list[Question], answers: dict[str, object], facts) -> dict:
@@ -288,6 +330,8 @@ def fill(page, questions: list[Question], answers: dict[str, object], facts) -> 
                      "october", "november", "december"].index(str(value).split()[0].lower()) + 1  # fmt: skip
             value = f"{str(value).split()[1]}-{month:02d}"
         _apply(page, path, value, kind)
+        if kind == "text":
+            texting_consent(_entry(page, path), facts)
     report = readback(page, answers)
     report["not_on_form"] = sorted(not_on_form)
     return report
@@ -304,8 +348,9 @@ def readback(page, answers: dict[str, object]) -> dict:
         wanted = answers.get(f["id"])
         if wanted is None or f["kind"] in ("file", "date", "autocomplete"):
             continue  # verified at fill time by name chip / typed-value check / committed suggestion
-        if isinstance(wanted, list):
-            if sorted(str(w) for w in wanted) != current:
+        if f["kind"] == "checkbox":
+            wanted_list = sorted(str(w) for w in (wanted if isinstance(wanted, list) else [wanted]))
+            if wanted_list != current:
                 mismatches[f["id"]] = {"wanted": wanted, "held": current}
         elif str(wanted).strip() != str(current).strip():
             mismatches[f["id"]] = {"wanted": wanted, "held": current}
