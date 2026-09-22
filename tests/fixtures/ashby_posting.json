@@ -1,0 +1,476 @@
+{
+ "data": {
+  "jobPosting": {
+   "__typename": "JobPostingDetails",
+   "id": "3fba1c39-c5cb-47d7-9ad2-1cec4d7e9d0c",
+   "title": "Software Engineer Intern (Summer 2027)",
+   "departmentName": "Early Career",
+   "departmentExternalName": "Early Career",
+   "locationName": "San Francisco, California",
+   "locationAddress": null,
+   "workplaceType": "Hybrid",
+   "employmentType": "Intern",
+   "descriptionHtml": "<p>Software Engineer Intern, Summer 2027. Hybrid in San Francisco or New York.</p>",
+   "isListed": true,
+   "isConfidential": false,
+   "teamNames": [
+    "Early Career"
+   ],
+   "recaptchaAction": "job_apply",
+   "secondaryLocationNames": [
+    "New York, New York"
+   ],
+   "compensationTierSummary": null,
+   "compensationTiers": [],
+   "applicationDeadline": null,
+   "applicationLimitCalloutHtml": null,
+   "shouldAskForTextingConsent": false,
+   "shouldAskForWhatsAppConsent": false,
+   "applicationForm": {
+    "__typename": "FormRender",
+    "id": "18cb72fc-8b57-49fd-ac02-ec3fa2c784dd",
+    "errorMessages": [],
+    "formErrors": [],
+    "sourceFormDefinitionId": "{\"kind\":\"CompositeFormDefinitionId-JobPostingApplicationFormV2\",\"formDefinitionId\":\"03f6748a-cca8-4ea9-83f9-3ae39ab4aab2\",\"jobPostingId\":\"3fba1c39-c5cb-47d7-9ad2-1cec4d7e9d0c\",\"jobBoardSuperType\":\"External\"}",
+    "formControls": [
+     {
+      "__typename": "FormControl",
+      "identifier": "d3df8ea7-df90-4f78-8637-a3c668f160c2",
+      "title": "Submit"
+     }
+    ],
+    "sections": [
+     {
+      "__typename": "FormSectionRender",
+      "title": null,
+      "descriptionHtml": null,
+      "isHidden": null,
+      "fieldEntries": [
+       {
+        "__typename": "FormFieldEntry",
+        "id": "18cb72fc-8b57-49fd-ac02-ec3fa2c784dd__systemfield_name",
+        "field": {
+         "id": "993d32d2-dfb2-4587-9fc8-5b17a1f205ea",
+         "path": "_systemfield_name",
+         "humanReadablePath": "Name",
+         "title": "Full Name",
+         "isNullable": false,
+         "isPrivate": false,
+         "isDeactivated": false,
+         "isMany": false,
+         "metadata": {},
+         "type": "String",
+         "__autoSerializationID": "StringField"
+        },
+        "fieldValue": null,
+        "isRequired": true,
+        "descriptionHtml": null,
+        "isHidden": null
+       },
+       {
+        "__typename": "FormFieldEntry",
+        "id": "18cb72fc-8b57-49fd-ac02-ec3fa2c784dd__systemfield_email",
+        "field": {
+         "id": "4287bed1-8150-47e8-ab41-2158f20a1ef7",
+         "path": "_systemfield_email",
+         "humanReadablePath": "Email",
+         "title": "Email",
+         "isNullable": false,
+         "isPrivate": false,
+         "isDeactivated": false,
+         "isMany": false,
+         "metadata": {},
+         "type": "Email",
+         "__autoSerializationID": "EmailField"
+        },
+        "fieldValue": null,
+        "isRequired": true,
+        "descriptionHtml": null,
+        "isHidden": null
+       },
+       {
+        "__typename": "FormFieldEntry",
+        "id": "18cb72fc-8b57-49fd-ac02-ec3fa2c784dd_d58506bf-393d-4769-a6ec-bdebe07843ed",
+        "field": {
+         "id": "d58506bf-393d-4769-a6ec-bdebe07843ed",
+         "path": "d58506bf-393d-4769-a6ec-bdebe07843ed",
+         "humanReadablePath": "",
+         "title": "Phone",
+         "isNullable": false,
+         "isPrivate": false,
+         "isDeactivated": false,
+         "isMany": false,
+         "metadata": {},
+         "type": "Phone",
+         "__autoSerializationID": "PhoneField"
+        },
+        "fieldValue": null,
+        "isRequired": true,
+        "descriptionHtml": null,
+        "isHidden": null
+       },
+       {
+        "__typename": "FormFieldEntry",
+        "id": "18cb72fc-8b57-49fd-ac02-ec3fa2c784dd__systemfield_resume",
+        "field": {
+         "id": "67d6822f-6e1c-4b28-ad0e-8549c69dc124",
+         "path": "_systemfield_resume",
+         "humanReadablePath": "Resume",
+         "title": "Resume",
+         "isNullable": false,
+         "isPrivate": false,
+         "isDeactivated": false,
+         "isMany": false,
+         "metadata": {},
+         "type": "File",
+         "__autoSerializationID": "FileField"
+        },
+        "fieldValue": null,
+        "isRequired": true,
+        "descriptionHtml": null,
+        "isHidden": null
+       },
+       {
+        "__typename": "FormFieldEntry",
+        "id": "18cb72fc-8b57-49fd-ac02-ec3fa2c784dd__systemfield_location",
+        "field": {
+         "id": "a7023385-6849-4cab-b0ca-edb4c657d34a",
+         "path": "_systemfield_location",
+         "humanReadablePath": "Location",
+         "title": "Current Location",
+         "isNullable": false,
+         "isPrivate": false,
+         "isDeactivated": false,
+         "isMany": false,
+         "metadata": {},
+         "type": "Location",
+         "locationTypes": [
+          "City",
+          "Country"
+         ],
+         "__autoSerializationID": "LocationField"
+        },
+        "fieldValue": null,
+        "isRequired": true,
+        "descriptionHtml": null,
+        "isHidden": null
+       },
+       {
+        "__typename": "FormFieldEntry",
+        "id": "18cb72fc-8b57-49fd-ac02-ec3fa2c784dd_a05e892e-4a9f-4431-b491-013d6a3f804a",
+        "field": {
+         "id": "a05e892e-4a9f-4431-b491-013d6a3f804a",
+         "path": "a05e892e-4a9f-4431-b491-013d6a3f804a",
+         "humanReadablePath": "",
+         "title": "What pronouns would you like our team to use when addressing you?",
+         "isNullable": false,
+         "isPrivate": false,
+         "isDeactivated": false,
+         "isMany": false,
+         "metadata": {},
+         "type": "ValueSelect",
+         "selectableValues": [
+          {
+           "label": "He/Him",
+           "value": "He/Him"
+          },
+          {
+           "label": "She/Her",
+           "value": "She/Her"
+          },
+          {
+           "label": "They/Them",
+           "value": "They/Them"
+          },
+          {
+           "label": "Prefer not to say",
+           "value": "Prefer not to say"
+          },
+          {
+           "label": "Not represented here",
+           "value": "Not represented here"
+          }
+         ],
+         "__autoSerializationID": "ValueSelectField"
+        },
+        "fieldValue": null,
+        "isRequired": true,
+        "descriptionHtml": null,
+        "isHidden": null
+       }
+      ]
+     },
+     {
+      "__typename": "FormSectionRender",
+      "title": null,
+      "descriptionHtml": null,
+      "isHidden": null,
+      "fieldEntries": [
+       {
+        "__typename": "FormFieldEntry",
+        "id": "18cb72fc-8b57-49fd-ac02-ec3fa2c784dd_30fcdc85-13b8-43a4-9fb4-0ea387642215",
+        "field": {
+         "id": "30fcdc85-13b8-43a4-9fb4-0ea387642215",
+         "path": "30fcdc85-13b8-43a4-9fb4-0ea387642215",
+         "humanReadablePath": "",
+         "title": "We work from our offices on Mondays, Tuesdays, and Thursdays (Anchor Days). If you need an accommodation, we\u2019ll partner with you and explore reasonable options consistent with applicable law. Are you able to commit to working from one of our offices on Anchor Days each week?",
+         "isNullable": false,
+         "isPrivate": false,
+         "isDeactivated": false,
+         "isMany": false,
+         "metadata": {},
+         "type": "Boolean",
+         "__autoSerializationID": "BooleanField"
+        },
+        "fieldValue": null,
+        "isRequired": true,
+        "descriptionHtml": null,
+        "isHidden": null
+       },
+       {
+        "__typename": "FormFieldEntry",
+        "id": "18cb72fc-8b57-49fd-ac02-ec3fa2c784dd_2ff3be8b-ab56-445f-ad6c-8753234d2a91",
+        "field": {
+         "id": "2ff3be8b-ab56-445f-ad6c-8753234d2a91",
+         "path": "2ff3be8b-ab56-445f-ad6c-8753234d2a91",
+         "humanReadablePath": "",
+         "title": "Please indicate all of the locations that you would be interested in relocating to for this position.",
+         "isNullable": false,
+         "isPrivate": false,
+         "isDeactivated": false,
+         "isMany": false,
+         "metadata": {},
+         "type": "MultiValueSelect",
+         "selectableValues": [
+          {
+           "label": "New York, NY",
+           "value": "New York, NY"
+          },
+          {
+           "label": "San Francisco, CA",
+           "value": "San Francisco, CA"
+          }
+         ],
+         "__autoSerializationID": "MultiValueSelectField"
+        },
+        "fieldValue": null,
+        "isRequired": true,
+        "descriptionHtml": null,
+        "isHidden": null
+       }
+      ]
+     },
+     {
+      "__typename": "FormSectionRender",
+      "title": "",
+      "descriptionHtml": null,
+      "isHidden": null,
+      "fieldEntries": [
+       {
+        "__typename": "FormFieldEntry",
+        "id": "18cb72fc-8b57-49fd-ac02-ec3fa2c784dd_1c25bf6e-4a26-4d56-a5d0-89cd3b75d28a",
+        "field": {
+         "id": "1c25bf6e-4a26-4d56-a5d0-89cd3b75d28a",
+         "path": "1c25bf6e-4a26-4d56-a5d0-89cd3b75d28a",
+         "humanReadablePath": "",
+         "title": "Why do you want to work at Notion?",
+         "isNullable": false,
+         "isPrivate": false,
+         "isDeactivated": false,
+         "isMany": false,
+         "metadata": {},
+         "type": "LongText",
+         "__autoSerializationID": "LongTextField"
+        },
+        "fieldValue": null,
+        "isRequired": true,
+        "descriptionHtml": null,
+        "isHidden": null
+       },
+       {
+        "__typename": "FormFieldEntry",
+        "id": "18cb72fc-8b57-49fd-ac02-ec3fa2c784dd_f3a0a2df-77c1-43dc-9242-6788bd05e7c5",
+        "field": {
+         "id": "f3a0a2df-77c1-43dc-9242-6788bd05e7c5",
+         "path": "f3a0a2df-77c1-43dc-9242-6788bd05e7c5",
+         "humanReadablePath": "",
+         "title": "Graduation Date",
+         "isNullable": false,
+         "isPrivate": false,
+         "isDeactivated": false,
+         "isMany": false,
+         "metadata": {},
+         "type": "Date",
+         "__autoSerializationID": "DateField"
+        },
+        "fieldValue": null,
+        "isRequired": true,
+        "descriptionHtml": null,
+        "isHidden": null
+       }
+      ]
+     }
+    ]
+   },
+   "surveyForms": [
+    {
+     "__typename": "FormRender",
+     "id": "784a7160-c00c-4076-bb0f-b952440ca5b3",
+     "errorMessages": [],
+     "formErrors": [],
+     "sourceFormDefinitionId": "d99ca60a-5cb6-4d31-9648-5f06fe996d46",
+     "formControls": [
+      {
+       "__typename": "FormControl",
+       "identifier": "12e45e6f-c92d-4b18-af4a-ca940093be29",
+       "title": "Submit"
+      }
+     ],
+     "sections": [
+      {
+       "__typename": "FormSectionRender",
+       "title": null,
+       "descriptionHtml": "<p><strong>U.S. EQUAL EMPLOYMENT OPPORTUNITY INFORMATION</strong> \u00a0\u00a0(Completion is voluntary and will not subject you to adverse treatment)</p><p></p><p>Notion provides equal employment opportunities to applicants and employees without regard to race, color, religion, sex, sexual orientation, gender identity, national origin, protected veteran status, disability, or any other classification protected by applicable law.</p><p></p><p>We invite all applicants to voluntarily self-identify their race, ethnicity, and gender. Submission of the information on this form is strictly voluntary and refusal to provide it will not subject you to any adverse treatment. Information obtained will be retained in a confidential file and separate from personnel records. This information may only be used in accordance with the provision of applicable federal laws, executive orders, and regulations. If you want more information about any of the sections, please check with a company representative.</p>",
+       "isHidden": null,
+       "fieldEntries": [
+        {
+         "__typename": "FormFieldEntry",
+         "id": "784a7160-c00c-4076-bb0f-b952440ca5b3__systemfield_eeoc_gender",
+         "field": {
+          "id": "fbdcc6c7-fc72-4eb2-b7d5-7e149f79dda0",
+          "path": "_systemfield_eeoc_gender",
+          "humanReadablePath": "Gender",
+          "title": "Gender",
+          "isNullable": false,
+          "isPrivate": false,
+          "isDeactivated": false,
+          "isMany": false,
+          "metadata": {},
+          "type": "ValueSelect",
+          "selectableValues": [
+           {
+            "label": "Male",
+            "value": "male"
+           },
+           {
+            "label": "Female",
+            "value": "female"
+           },
+           {
+            "label": "Decline to self-identify",
+            "value": "decline_to_self_identify"
+           }
+          ],
+          "__autoSerializationID": "ValueSelectField"
+         },
+         "fieldValue": null,
+         "isRequired": false,
+         "descriptionHtml": "<p>Input gender</p>",
+         "isHidden": null
+        },
+        {
+         "__typename": "FormFieldEntry",
+         "id": "784a7160-c00c-4076-bb0f-b952440ca5b3__systemfield_eeoc_race",
+         "field": {
+          "id": "b33298aa-dca9-4f59-bc40-c673e60ec7a2",
+          "path": "_systemfield_eeoc_race",
+          "humanReadablePath": "Race",
+          "title": "Race",
+          "isNullable": false,
+          "isPrivate": false,
+          "isDeactivated": false,
+          "isMany": false,
+          "metadata": {},
+          "type": "ValueSelect",
+          "selectableValues": [
+           {
+            "label": "Hispanic or Latino",
+            "value": "hispanic_or_latino"
+           },
+           {
+            "label": "White (Not Hispanic or Latino)",
+            "value": "white"
+           },
+           {
+            "label": "Black or African American (Not Hispanic or Latino)",
+            "value": "black_or_african_american"
+           },
+           {
+            "label": "Native Hawaiian or Other Pacific Islander (Not Hispanic or Latino)",
+            "value": "native_hawaiian_or_other_pacific_islander"
+           },
+           {
+            "label": "Asian (Not Hispanic or Latino)",
+            "value": "asian"
+           },
+           {
+            "label": "American Indian or Alaska Native (Not Hispanic or Latino)",
+            "value": "american_indian_or_alaska_native"
+           },
+           {
+            "label": "Two or More Races (Not Hispanic or Latino)",
+            "value": "two_or_more_races"
+           },
+           {
+            "label": "Decline to self-identify",
+            "value": "decline_to_self_identify"
+           }
+          ],
+          "__autoSerializationID": "ValueSelectField"
+         },
+         "fieldValue": null,
+         "isRequired": false,
+         "descriptionHtml": "<ul><li><p><strong>Hispanic or Latino</strong> - A person of Cuban, Mexican, Puerto Rican, South or Central American, or other Spanish culture or origin regardless of race.</p></li></ul><ul><li><p><strong>White</strong> (Not Hispanic or Latino) - A person having origins in any of the original peoples of Europe, the Middle East, or North Africa.</p></li><li><p><strong>Black or African American</strong> (Not Hispanic or Latino) - A person having origins in any of the Black racial groups of Africa.</p></li><li><p><strong>Native Hawaiian or Other Pacific Islander</strong> (Not Hispanic or Latino) - A person having origins in any of the peoples of Hawaii, Guam, Samoa, or other Pacific Islands.</p></li><li><p><strong>Asian</strong> (Not Hispanic or Latino) - A person having origins in any of the original peoples of the Far East, Southeast Asia, or the Indian Subcontinent, including, for example, Cambodia, China, India, Japan, Korea, Malaysia, Pakistan, the Philippine Islands, Thailand, and Vietnam.</p></li><li><p><strong>American Indian or Alaska Native</strong> (Not Hispanic or Latino) - A person having origins in any of the original peoples of North and South America (including Central America), and who maintain tribal affiliation or community attachment.</p></li><li><p><strong>Two or More Races</strong> (Not Hispanic or Latino) - All persons who identify with more than one of the above five races.</p></li></ul>",
+         "isHidden": null
+        }
+       ]
+      },
+      {
+       "__typename": "FormSectionRender",
+       "title": null,
+       "descriptionHtml": "<p><strong>SELF-IDENTIFICATION OF VETERAN STATUS</strong> \u00a0(Completion is voluntary and will not subject you to adverse treatment)</p><p>If you believe that you belong to any of the following categories of protected veterans, please indicate by making the appropriate selection</p><ul><li><p><strong>Disabled veteran</strong> \u2013 A veteran who served on active duty in the U.S. military and is entitled to disability compensation (or who but for the receipt of military retired pay would be entitled to disability compensation) under laws administered by the Secretary of Veterans Affairs, or was discharged or released from active duty because of a service-connected disability</p></li><li><p><strong>Recently separated veteran</strong> \u2013 A veteran separated during the three-year period beginning on the date of the veteran's discharge or release from active duty in the U.S military, ground, naval, or air service</p></li><li><p><strong>Active duty wartime or campaign badge veteran</strong> \u2013 A veteran who served on active duty in the U.S. military during a war, or in a campaign or expedition for which a campaign badge was authorized under the laws administered by the Department of Defense</p></li><li><p><strong>Armed forces service medal veteran</strong> \u2013 A veteran who, while serving on active duty in the U.S. military, ground, naval, or air service, participated in a United States military operation for which an Armed Forces service medal was awarded pursuant to Executive Order 12985 (61 Fed. Reg. 1209).</p></li></ul>",
+       "isHidden": null,
+       "fieldEntries": [
+        {
+         "__typename": "FormFieldEntry",
+         "id": "784a7160-c00c-4076-bb0f-b952440ca5b3__systemfield_eeoc_veteran_status",
+         "field": {
+          "id": "6c5975cb-a5d8-476a-9ddf-d92a99475904",
+          "path": "_systemfield_eeoc_veteran_status",
+          "humanReadablePath": "Veteran Status",
+          "title": "Veteran Status",
+          "isNullable": false,
+          "isPrivate": false,
+          "isDeactivated": false,
+          "isMany": false,
+          "metadata": {},
+          "type": "ValueSelect",
+          "selectableValues": [
+           {
+            "label": "I identify as one or more of the classifications of protected veteran listed above",
+            "value": "protected_veteran"
+           },
+           {
+            "label": "I am not a protected veteran",
+            "value": "non_protected_veteran"
+           },
+           {
+            "label": "I decline to self-identify for protected veteran status",
+            "value": "decline_to_self_identify"
+           }
+          ],
+          "__autoSerializationID": "ValueSelectField"
+         },
+         "fieldValue": null,
+         "isRequired": false,
+         "descriptionHtml": null,
+         "isHidden": null
+        }
+       ]
+      }
+     ]
+    }
+   ]
+  }
+ }
+}

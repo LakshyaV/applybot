@@ -13,8 +13,10 @@ import typer
 from . import db, filters, preflight, resolve as rs
 from . import models as m
 from .config import DATA_DIR, ROOT, load_config, load_profile
-from .forms import greenhouse
+from .forms import ashby, greenhouse
 from .normalize import is_tracker
+
+LANES = {"greenhouse": greenhouse, "ashby": ashby}  # scripted form fillers, by ATS
 from .sources import boards, github_repo
 
 GENERIC_OPTION_RE = (r"bachelor|undergrad|software|computer|engineering|english|other|none|not applicable|n/a|"
@@ -214,19 +216,20 @@ def survey(ats: str = "greenhouse", limit: int = 50):
     """Read-only census: fetch form schemas via the ATS API, preflight the JD, record unanswered questions."""
     import httpx
 
-    if ats != "greenhouse":
-        raise typer.BadParameter("only greenhouse exposes its form schema through a public API")
+    lane = LANES.get(ats)
+    if lane is None:
+        raise typer.BadParameter(f"no scripted lane for {ats}: " + ", ".join(LANES))
     conn, profile = db.connect(), load_profile()
     rows = conn.execute(
         "SELECT * FROM jobs WHERE status = ? AND ats = ? ORDER BY priority, date_posted DESC, id LIMIT ?",
         (m.QUEUED, ats, limit),
     ).fetchall()
     tally = Counter()
-    with httpx.Client(timeout=30) as client:
+    with httpx.Client(timeout=30, headers=getattr(lane, "HEADERS", {})) as client:
         for row in rows:
             try:
-                questions, meta = greenhouse.parse(greenhouse.fetch(row["board"], row["ats_job_id"], client))
-            except greenhouse.Gone:
+                questions, meta = lane.parse(lane.fetch(row["board"], row["ats_job_id"], client))
+            except lane.Gone:
                 db.set_status(conn, row["id"], m.CLOSED, "posting removed (ATS API 404)")
                 tally["gone"] += 1
                 continue
@@ -247,7 +250,7 @@ def survey(ats: str = "greenhouse", limit: int = 50):
             (run_dir / "schema.json").write_text(json.dumps(
                 {"meta": meta, "questions": [vars(q) for q in questions]}, indent=1, ensure_ascii=False))
             ctx = rs.JobContext(row["company"], countries)
-            preset = greenhouse.preset_answers(questions, rs.Facts(profile, ctx), profile["resume_path"])
+            preset = lane.preset_answers(questions, rs.Facts(profile, ctx), profile["resume_path"])
             result = rs.resolve(conn, questions, profile, ctx, preset)
             for q in result.misses:
                 rs.record_miss(conn, q, row["id"])
@@ -369,10 +372,13 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict
 
     if filters.is_excluded_company(row["company"], cfg):  # last line of defence, whatever the queue says
         return finish(m.ALREADY_APPLIED, "user already applied to this company by hand")
+    lane = LANES.get(row["ats"])
+    if lane is None:
+        return finish(m.NEEDS_HUMAN, f"no scripted lane for {row['ats']}")
 
     try:
-        questions, meta = greenhouse.parse(greenhouse.fetch(row["board"], row["ats_job_id"]))
-    except greenhouse.Gone:
+        questions, meta = lane.parse(lane.fetch(row["board"], row["ats_job_id"]))
+    except lane.Gone:
         return finish(m.CLOSED, "posting removed (ATS API 404)")
     except Exception as err:  # noqa: BLE001 — a network dropout must cost one form, not the whole batch
         return finish(m.FAILED, f"could not load the form schema ({type(err).__name__}); nothing was filled or sent")
@@ -380,6 +386,8 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict
     blocked, reason = preflight.check(meta["description"], countries)
     if blocked:
         return finish(blocked, reason)
+    if meta.get("employment_type") and meta["employment_type"].lower() not in ("intern", "internship", "contract", "temporary"):
+        return finish(m.SKIPPED_INELIGIBLE, f"posting is {meta['employment_type']}, not an internship")
     ctx = rs.JobContext(row["company"], countries)
     facts = rs.Facts(profile, ctx)
     for q in questions:
@@ -387,10 +395,11 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict
 
     page = context.new_page()
     try:
-        if not greenhouse.open_form(page, row["board"], row["ats_job_id"]):
-            return finish(m.NEEDS_HUMAN, "could not reach a standard Greenhouse form (hosted page and embed address both failed)")
-        questions += greenhouse.dom_only_questions(page, questions, row["company"])
-        preset = greenhouse.preset_answers(questions, facts, str(ROOT / profile["resume_path"]))
+        if not lane.open_form(page, row["board"], row["ats_job_id"]):
+            return finish(m.NEEDS_HUMAN, f"could not reach a standard {row['ats']} form")
+        if hasattr(lane, "dom_only_questions"):
+            questions += lane.dom_only_questions(page, questions, row["company"])
+        preset = lane.preset_answers(questions, facts, str(ROOT / profile["resume_path"]))
         on_form = {q.id for q in questions}
         for essay in conn.execute("SELECT question_id, text FROM essays WHERE job_id = ? AND status = 'written'", (job_id,)):
             if essay["question_id"] in on_form:
@@ -401,7 +410,7 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict
         for q, why in result.human:  # visible in `questions`, so a user-directed exception has something to attach to
             if why == "human-only question":
                 rs.record_miss(conn, q, job_id, needs="human")
-        limits = {f["id"]: f.get("maxlength") for f in greenhouse.dom_census(page)}
+        limits = {f["id"]: f.get("maxlength") for f in lane.dom_census(page)}
         for q in result.essays:  # ask for exactly the essays this form requires, with the field's size limit
             conn.execute("INSERT OR IGNORE INTO essays (job_id, question_id, label, created_at) VALUES (?,?,?,?)",
                          (job_id, q.id, q.label, int(time.time())))  # fmt: skip
@@ -425,7 +434,7 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict
             pending = [q.label[:50] for q in (result.misses + result.essays)[:4]]
             return finish(m.NEEDS_ANSWERS, f"{len(result.misses)} unanswered, {len(result.essays)} essays: {pending}")
 
-        report = greenhouse.fill(page, questions, dict(result.answers), facts)
+        report = lane.fill(page, questions, dict(result.answers), facts)
         (run_dir / "report.json").write_text(json.dumps(report, indent=1, ensure_ascii=False, default=str))
         page.screenshot(path=str(run_dir / "filled.png"), full_page=True)
         if report["mismatches"] or report["empty_required"]:
@@ -435,10 +444,10 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict
 
         application_id = conn.execute(
             "INSERT INTO applications (job_id, mode, lane, started_at, run_dir) VALUES (?,?,?,?,?)",
-            (job_id, cfg["mode"], "greenhouse", int(time.time()), str(run_dir)),
+            (job_id, cfg["mode"], row["ats"], int(time.time()), str(run_dir)),
         ).lastrowid
         db.begin_submit(conn, job_id, application_id)  # write-ahead: from here a crash means `verify`, never a retry
-        outcome, detail = greenhouse.submit(page)
+        outcome, detail = lane.submit(page)
         if outcome == greenhouse.NEEDS_CODE:
             typer.echo(json.dumps({**summary, "event": "needs_code", "hint": f"uv run applybot code {job_id} <8-char code from email>"}))
             code = _wait_for_code(conn, job_id, timeout_s=600)
@@ -529,12 +538,12 @@ def run(
                 marks = ",".join("?" * len(ids))
                 claimed = conn.execute(
                     f"UPDATE jobs SET status = ?, lease_until = ?, claimed_by = ? WHERE id IN ({marks}) AND status = ? "
-                    "AND ats = 'greenhouse' RETURNING *",
-                    (m.IN_PROGRESS, int(time.time()) + db.LEASE_SECONDS, f"run-{os.getpid()}", *ids, m.QUEUED),
+                    f"AND ats IN ({','.join('?' * len(LANES))}) RETURNING *",
+                    (m.IN_PROGRESS, int(time.time()) + db.LEASE_SECONDS, f"run-{os.getpid()}", *ids, m.QUEUED, *LANES),
                 ).fetchall()
                 claimed.sort(key=lambda r: ids.index(r["id"]))  # run them in the order they were asked for
             else:
-                claimed = db.claim(conn, limit, f"run-{os.getpid()}", ["greenhouse"])
+                claimed = db.claim(conn, limit, f"run-{os.getpid()}", list(LANES))
             for row in claimed:
                 outcome = _process(conn, profile, cfg, context, row, submit)
                 tally[outcome["status"]] += 1
