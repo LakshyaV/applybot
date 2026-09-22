@@ -108,7 +108,16 @@ DECLINE_PHRASES = {
     "prefer not to state", "i prefer not to state", "prefer not to identify", "prefer not to self-identify",
     "i'd rather not say", "i would rather not say", "rather not say", "i'd rather not disclose",
     "i do not wish to identify", "i choose not to self-identify", "choose not to self-identify", "choose not to identify",
+    "i decline to self-identify for protected veteran status", "i don't wish to answer",
 }  # fmt: skip
+# Veteran status when the profile says `not_a_veteran`: the form's own "not a veteran" option, matched exactly.
+NOT_VETERAN_PHRASES = {
+    "i am not a protected veteran", "i am not a veteran", "not a veteran", "not a protected veteran", "no",
+    "no, i am not a protected veteran", "no, i am not a veteran", "i am not a veteran of the u.s. armed forces",
+    "i am not a protected veteran.", "i am not a protected veteran or a veteran", "i am not a veteran or a protected veteran",
+    "i identify as not a protected veteran", "no, i am not a veteran or protected veteran",
+}  # fmt: skip
+VETERAN_RE = re.compile(r"veteran", re.I)
 LOW, VERIFY, CRITICAL = 0, 1, 2
 
 
@@ -132,6 +141,16 @@ def is_high_stakes(question: Question) -> bool:
 def eeo_decline_option(question: Question) -> str | None:
     matches = [o for o in question.options if normalize(o).rstrip(".") in DECLINE_PHRASES]
     return matches[0] if len(matches) == 1 else None
+
+
+def eeo_option(question: Question, eeo: dict) -> str | None:
+    """The option the user's EEO policy selects on this question: the "not a veteran" option for veteran-status
+    questions when the profile says so, otherwise the decline option when the policy is decline."""
+    if VETERAN_RE.search(question.label) and eeo.get("veteran_status") == "not_a_veteran":
+        matches = [o for o in question.options if normalize(o).rstrip(".") in NOT_VETERAN_PHRASES]
+        if len(matches) == 1:
+            return matches[0]
+    return eeo_decline_option(question)
 
 
 # --- facts -------------------------------------------------------------------------------------
@@ -476,8 +495,8 @@ def resolve(conn: sqlite3.Connection, questions: list[Question], profile: dict, 
                 if q.required:
                     out.human.append((q, "human-only question"))
                 continue
-        if is_eeo(q) and all(profile["eeo"].get(k, DECLINE) == DECLINE for k in EEO_KEYS):
-            option = eeo_decline_option(q)
+        if is_eeo(q) and all(profile["eeo"].get(k, DECLINE) in (DECLINE, "not_a_veteran") for k in EEO_KEYS):
+            option = eeo_option(q, profile["eeo"])
             if option:
                 out.answers[q.id] = option
                 continue

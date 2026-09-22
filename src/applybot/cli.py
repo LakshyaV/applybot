@@ -7,6 +7,7 @@ import signal
 import time
 from datetime import date
 from collections import Counter
+from pathlib import Path
 
 import typer
 
@@ -358,7 +359,7 @@ def approvals(
         typer.echo("nothing awaiting clearance")
 
 
-def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict:
+def _process(conn, profile: dict, cfg: dict, context, row, submit: bool, headless: bool = True) -> dict:
     """One Greenhouse application: schema → preflight → resolve → fill → readback → (optionally) submit.
     Returns a small summary dict and leaves the job in its final status."""
     job_id = row["id"]
@@ -439,6 +440,31 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool) -> dict
             return finish(m.FAILED, f"readback: mismatches={list(report['mismatches'])} empty={report['empty_required'][:5]}")
         if not submit:
             return finish(m.DRY_RUN_DONE, "filled and verified; not submitted (dry run)", filled=len(result.answers))
+
+        if row["ats"] in (cfg.get("fill_only_ats") or []):
+            # This ATS rejects automated submits: the human clicks Submit in the visible window.
+            if headless:
+                return finish(m.DRY_RUN_DONE, "filled and verified; fill-only lane needs a visible window (run without --headless)")
+            if not hasattr(lane, "await_human_submit"):
+                return finish(m.NEEDS_HUMAN, f"no fill-only support for {row['ats']}")
+            application_id = conn.execute(
+                "INSERT INTO applications (job_id, mode, lane, started_at, run_dir) VALUES (?,?,?,?,?)",
+                (job_id, "fill_only", row["ats"], int(time.time()), str(run_dir)),
+            ).lastrowid
+            db.begin_submit(conn, job_id, application_id)
+            typer.echo(json.dumps({**summary, "event": "needs_click", "hint": "click Submit in the open Chrome window (10 min)"}))
+            page.bring_to_front()
+            outcome, detail = lane.await_human_submit(page)
+            page.screenshot(path=str(run_dir / "after_submit.png"), full_page=True)
+            if outcome == greenhouse.UNKNOWN:
+                conn.execute("UPDATE applications SET finished_at = ?, outcome = 'not_clicked' WHERE id = ?",
+                             (int(time.time()), application_id))  # fmt: skip
+                return finish(m.NEEDS_HUMAN, "fill-only: Submit was not clicked within 10 min; nothing was sent")
+            final = {greenhouse.CONFIRMED: m.SUBMITTED, greenhouse.INVALID: m.FAILED,
+                     greenhouse.CHALLENGE: m.NEEDS_HUMAN}.get(outcome, m.VERIFY)  # fmt: skip
+            conn.execute("UPDATE applications SET finished_at = ?, outcome = ?, confirmation = ? WHERE id = ?",
+                         (int(time.time()), outcome, detail, application_id))  # fmt: skip
+            return finish(final, f"{outcome}: {detail}")
 
         application_id = conn.execute(
             "INSERT INTO applications (job_id, mode, lane, started_at, run_dir) VALUES (?,?,?,?,?)",
@@ -543,7 +569,7 @@ def run(
             else:
                 claimed = db.claim(conn, limit, f"run-{os.getpid()}", list(LANES))
             for row in claimed:
-                outcome = _process(conn, profile, cfg, context, row, submit)
+                outcome = _process(conn, profile, cfg, context, row, submit, headless)
                 tally[outcome["status"]] += 1
                 typer.echo(json.dumps(outcome, ensure_ascii=False))
                 if submit and outcome["status"] == m.SUBMITTED and row is not claimed[-1]:
@@ -635,6 +661,64 @@ def resolve_embeds(limit: int = 400):
                          (token, key, f"https://job-boards.greenhouse.io/{token}/jobs/{row['ats_job_id']}", row["id"]))  # fmt: skip
             tally["resolved"] += 1
     typer.echo(json.dumps(dict(tally)))
+
+
+@app.command()
+def sheet(ats: str = "ashby", limit: int = 20, out: str = "data/manual_sheet.md"):
+    """Copy-paste answer sheet for roles the user applies to by hand (ATSes that reject automated submits).
+    Every answer comes from the same resolver as the automated lanes; unresolved questions are listed as such."""
+    cfg, profile, conn = load_config(), load_profile(), db.connect()
+    lane = LANES.get(ats)
+    if lane is None:
+        raise typer.BadParameter(f"no lane for {ats}")
+    rows = conn.execute(
+        "SELECT * FROM jobs WHERE ats = ? AND status IN (?, ?, ?, ?, ?) ORDER BY priority, date_posted DESC LIMIT ?",
+        (ats, m.QUEUED, m.NEEDS_HUMAN, m.NEEDS_ANSWERS, m.FAILED, m.DRY_RUN_DONE, limit),
+    ).fetchall()
+    lines = [f"# Manual applications — {ats} ({date.today()})", "",
+             f"Resume: `{ROOT / profile['resume_path']}`  ·  each section = one posting; open the link, paste the answers, click Submit.", ""]
+    done = 0
+    for row in rows:
+        if filters.is_excluded_company(row["company"], cfg):
+            continue
+        try:
+            questions, meta = lane.parse(lane.fetch(row["board"], row["ats_job_id"]))
+        except Exception as err:  # noqa: BLE001
+            lines += [f"## {row['company']} — {row['title']}", f"{row['url']}", f"_could not load form: {type(err).__name__}_", ""]
+            continue
+        countries = meta["countries"] if meta["countries"] != ["UNKNOWN"] else json.loads(row["countries"])
+        blocked, reason = preflight.check(meta["description"], countries)
+        if blocked:
+            db.set_status(conn, row["id"], blocked, reason)
+            continue
+        ctx = rs.JobContext(row["company"], countries)
+        facts = rs.Facts(profile, ctx)
+        for q in questions:
+            q.company = row["company"]
+        preset = lane.preset_answers(questions, facts, str(ROOT / profile["resume_path"]))
+        for essay in conn.execute("SELECT question_id, text FROM essays WHERE job_id = ? AND status = 'written'", (row["id"],)):
+            preset[essay["question_id"]] = essay["text"]
+        result = rs.resolve(conn, questions, profile, ctx, preset)
+        open_items = {q.id: why for q, why in result.human} | {q.id: f"missing {f}" for q, f in result.needs_input}
+        open_items |= {q.id: "no answer in the bank yet" for q in result.misses} | {q.id: "essay to write" for q in result.essays}
+        lines += [f"## {row['company']} — {row['title']}  (job {row['id']})", f"{row['url']}", "",
+                  "| Field | Answer |", "|---|---|"]
+        for q in questions:
+            if q.section == "eeo" and q.id not in result.answers:
+                continue
+            value = result.answers.get(q.id)
+            if value is None and q.id in open_items:
+                shown = f"**YOU DECIDE** — {open_items[q.id]}"
+            elif value is None:
+                shown = "_(leave blank)_" if not q.required else "**YOU DECIDE**"
+            else:
+                shown = str(value).replace("|", "\\|").replace("\n", " ")
+            req = "*" if q.required else ""
+            lines.append(f"| {q.label[:90].replace('|', '/')}{req} | {shown[:400]} |")
+        lines.append("")
+        done += 1
+    Path(out).write_text("\n".join(lines))
+    typer.echo(f"wrote {done} postings to {out}")
 
 
 PLACEHOLDER_RE = re.compile(r"\[[^\]]{2,40}\]|\{[a-z_ ]{2,30}\}|lorem ipsum|as an ai\b|language model", re.I)

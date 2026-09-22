@@ -153,6 +153,19 @@ def test_eeo_without_a_decline_option_is_blank_if_voluntary_and_never_guessed_if
     assert out.answers == {} and out.misses == [required]
 
 
+def test_veteran_status_not_a_veteran_uses_the_forms_own_wording(conn):
+    stated = copy.deepcopy(PROFILE)
+    stated["eeo"]["veteran_status"] = "not_a_veteran"
+    forms = [
+        Question("v1", "Veteran Status", "select", False, ["I identify as one or more of the classifications of protected veteran listed above",
+                                                            "I am not a protected veteran", "I decline to self-identify for protected veteran status"], section="eeo"),
+        Question("v2", "Are you a protected veteran?", "select", True, ["Yes", "No"]),
+        Question("g", "Gender", "select", False, ["Male", "Female", "Decline To Self Identify"], section="eeo"),
+    ]  # fmt: skip
+    out = resolve(conn, forms, stated, US)
+    assert out.answers == {"v1": "I am not a protected veteran", "v2": "No", "g": "Decline To Self Identify"}
+
+
 def test_eeo_policy_is_not_applied_once_the_user_fills_in_real_answers(conn):
     filled = copy.deepcopy(PROFILE)
     filled["eeo"]["gender"] = "Female"

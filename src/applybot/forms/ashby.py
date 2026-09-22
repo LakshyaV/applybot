@@ -415,3 +415,30 @@ def submit(page, wait_ms: int = 30_000) -> tuple[str, str]:
             break
     statuses = [s for s, _ in responses][-4:]
     return outcome, f"{note} POST statuses={statuses} url={page.url}".strip()
+
+
+def await_human_submit(page, wait_ms: int = 600_000) -> tuple[str, str]:
+    """Fill-only lane: the form is filled and parked in a visible window; the human clicks Submit. Watch the page
+    until Ashby confirms or rejects, or the wait runs out (then nothing was sent)."""
+    responses: list[tuple[int, str]] = []
+
+    def on_response(resp):
+        if resp.request.method == "POST" and "ashbyhq.com" in resp.url and "graphql" in resp.url:
+            try:
+                responses.append((resp.status, resp.text()[:2000]))
+            except Exception:  # noqa: BLE001
+                responses.append((resp.status, ""))
+
+    page.on("response", on_response)
+    waited = 0
+    while waited < wait_ms:
+        page.wait_for_timeout(1_000)
+        waited += 1_000
+        try:
+            outcome, note = _classify(page, responses)
+        except Exception:  # noqa: BLE001 — page navigating mid-check
+            continue
+        if outcome != UNKNOWN:
+            statuses = [s for s, _ in responses][-4:]
+            return outcome, f"{note} POST statuses={statuses} url={page.url}".strip()
+    return UNKNOWN, "no submit click within the wait; nothing was sent"
