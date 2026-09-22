@@ -249,6 +249,23 @@ def test_us_named_question_is_answered_with_us_facts_even_on_a_canadian_posting(
     assert resolve(conn, [q], PROFILE, JobContext("Acme", ["UNKNOWN"])).answers == {"q": "No"}  # no job country needed
 
 
+def test_adjective_country_name_is_recognised(conn):
+    q = Question("q", "AUSTRALIAN WORK AUTHORIZATION", "select", True, ["Yes", "No"])
+    bank_put(conn, q, {"kind": "fact_option", "fact": "work_authorized", "options": {"Yes": True, "No": False}},
+             "llm", approved=True)  # fmt: skip
+    # "Australian" names Australia: the answer is the international one even on a Canadian posting
+    assert resolve(conn, [q], PROFILE, CA).answers == {"q": "No"}
+
+
+def test_visa_type_is_per_posting_country(conn):
+    q = Question("q", "Which sponsorship will you require?", "select", True, ["J1", "None", "Other"])
+    bank_put(conn, q, {"kind": "fact_option", "fact": "visa_type_needed", "options": {"J1": "J-1", "None": "None"}},
+             "llm", approved=True)  # fmt: skip
+    assert resolve(conn, [q], PROFILE, US).answers == {"q": "J1"}
+    assert resolve(conn, [q], PROFILE, CA).answers == {"q": "None"}
+    assert resolve(conn, [q], PROFILE, JobContext("Acme", ["OTHER"])).answers == {}  # unknown elsewhere
+
+
 def test_question_naming_two_countries_goes_to_the_human(conn):
     q = Question("q", "Are you authorized to work in the US or Canada?", "select", True, ["Yes", "No"])
     bank_put(conn, q, {"kind": "fact_option", "fact": "work_authorized", "options": {"Yes": True, "No": False}},

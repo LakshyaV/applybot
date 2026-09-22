@@ -249,7 +249,10 @@ class Facts:
             "coop_program": edu.get("coop_program"),
             "class_standing": edu.get("class_standing_fall_2026"),
             "high_school_grad_year": edu.get("high_school_grad_year"),
-            "visa_type_needed": auth["by_country"].get("US", {}).get("visa_type_needed"),
+            # The visa the applicant would need for THIS posting: the US one on US postings, none at all in the
+            # country of citizenship, unknown elsewhere (so the question stops for a human instead of guessing).
+            "visa_type_needed": (auth["by_country"].get("US", {}).get("visa_type_needed") if self.ctx.country == "US"
+                                 else "None" if self.ctx.country == "CA" else None),
             "export_license_required": auth["by_country"].get("US", {}).get("export_license_required"),
             "may_contact_current_employer": p["consents"].get("may_contact_current_employer"),
             "can_perform_essential_functions": avail.get("can_perform_essential_functions"),
@@ -519,9 +522,11 @@ def resolve(conn: sqlite3.Connection, questions: list[Question], profile: dict, 
 NAMED_US_RE = re.compile(r"(?i:\bunited states\b|\bu\.s\b|\bu\.s\.a\b|\busa\b|\bamerica\b)|\bUS\b")
 NAMED_CA_RE = re.compile(r"\bcanad(a|ian)\b", re.I)
 NAMED_OTHER_RE = re.compile(
-    r"\b(united kingdom|uk|u\.k|britain|england|ireland|france|germany|netherlands|spain|italy|poland|sweden|"
-    r"switzerland|europe|eu|european union|schengen|india|singapore|hong kong|china|japan|korea|australia|"
-    r"new zealand|brazil|mexico|peru|argentina|israel|uae|dubai|abu dhabi)\b",
+    r"\b(united kingdom|uk|u\.k|britain|british|england|english|ireland|irish|france|french|germany|german|"
+    r"netherlands|dutch|spain|spanish|italy|italian|poland|polish|sweden|swedish|switzerland|swiss|europe|european|"
+    r"eu|european union|schengen|india|indian|singapore|singaporean|hong kong|china|chinese|japan|japanese|korea|"
+    r"korean|australia|australian|new zealand|brazil|brazilian|mexico|mexican|peru|argentina|israel|israeli|uae|"
+    r"dubai|abu dhabi|serbia|serbian)\b",
     re.I,
 )
 _EXPLICIT = {"work_authorized": "{}_work_authorized", "requires_sponsorship": "{}_requires_sponsorship"}

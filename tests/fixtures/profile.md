@@ -57,6 +57,7 @@ work_authorization:
       authorized: false
       requires_sponsorship: true
       note: "Canadian citizen. Eligible for TN status and the J-1 intern visa commonly used by Waterloo students."
+      visa_type_needed: "J-1"
   default:                            # any other country
     authorized: false
     requires_sponsorship: true
