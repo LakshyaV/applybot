@@ -108,7 +108,8 @@ DECLINE_PHRASES = {
     "prefer not to state", "i prefer not to state", "prefer not to identify", "prefer not to self-identify",
     "i'd rather not say", "i would rather not say", "rather not say", "i'd rather not disclose",
     "i do not wish to identify", "i choose not to self-identify", "choose not to self-identify", "choose not to identify",
-    "i decline to self-identify for protected veteran status", "i don't wish to answer",
+    "i decline to self-identify for protected veteran status", "i don't wish to answer", "do not wish to declare",
+    "i do not wish to declare", "prefer not to declare",
 }  # fmt: skip
 # Veteran status when the profile says `not_a_veteran`: the form's own "not a veteran" option, matched exactly.
 NOT_VETERAN_PHRASES = {
@@ -228,6 +229,20 @@ class Facts:
             "preferred_name": ident["preferred_name"], "email": ident["email"], "phone": ident["phone_display"],
             "phone_e164": ident["phone_e164"], "phone_national": ident["phone_national"],
             "pronouns": ident.get("pronouns"), "over_18": ident.get("over_18"),
+            "name_pronunciation": ident.get("name_pronunciation"),
+            # birth day/month: only for employers the user named (IBM pre-employment verification); never the year
+            "birth_month_name": MONTH_NAMES[int(ident["birth_month"]) - 1] if ident.get("birth_month") and company and any(
+                normalize(c) in company for c in p["consents"].get("birth_day_month_companies", [])) else None,
+            "birth_day": str(ident["birth_day"]) if ident.get("birth_day") and company and any(
+                normalize(c) in company for c in p["consents"].get("birth_day_month_companies", [])) else None,
+            "spi_processing_consent": True if company and any(
+                normalize(c) in company for c in p["consents"].get("spi_processing_consent_companies", [])) else None,
+            # a co-op student whose graduation is after the internship term goes back to full-time study
+            "returning_to_school_after_term": (int(edu["end"][:4]) > int(avail["season"][-4:])) if edu.get("end") and avail.get("season") else None,
+            "attended_university": True,
+            "signature_date_today": date.today().isoformat(),
+            "prior_internships": hist.get("prior_internships"),
+            "engineering_interests": p["defaults"].get("engineering_interests"),
             "linkedin": links["linkedin"], "github": links["github"], "website": links["website"],
             "address_line1": addr.get("line1"), "city": addr.get("city"), "province_state": addr.get("province_state"),
             "postal_code": addr.get("postal_code"), "country_of_residence": addr.get("country"),

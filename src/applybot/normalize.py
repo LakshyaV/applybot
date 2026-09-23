@@ -62,6 +62,8 @@ def detect_ats(url: str) -> tuple[str, str, str]:
             last = seg[-2]
         job_id = last.rsplit("_", 1)[-1] if "_" in last else last
         return "workday", f"{tenant}/{site}", job_id
+    if (host == "careers.ibm.com" or host == "ibmglobal.avature.net") and query.get("jobId"):
+        return "ibm", "ibm", query["jobId"]
     if host.endswith("smartrecruiters.com") and len(seg) >= 2:
         return "smartrecruiters", seg[0].lower(), re.sub(r"\D.*$", "", seg[1]) or seg[1]
     if host.endswith("icims.com") or query.get("icims") == "1":

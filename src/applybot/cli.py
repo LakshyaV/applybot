@@ -14,10 +14,10 @@ import typer
 from . import db, filters, preflight, resolve as rs
 from . import models as m
 from .config import DATA_DIR, ROOT, load_config, load_profile
-from .forms import ashby, greenhouse
+from .forms import ashby, greenhouse, ibm
 from .normalize import is_tracker
 
-LANES = {"greenhouse": greenhouse, "ashby": ashby}  # scripted form fillers, by ATS
+LANES = {"greenhouse": greenhouse, "ashby": ashby, "ibm": ibm}  # scripted form fillers, by ATS
 from .sources import boards, github_repo
 
 GENERIC_OPTION_RE = (r"bachelor|undergrad|software|computer|engineering|english|other|none|not applicable|n/a|"
@@ -394,6 +394,8 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool, headles
 
     page = context.new_page()
     try:
+        if hasattr(lane, "page_questions"):  # multi-page wizard (IBM): pages are discovered one at a time
+            return _process_wizard(conn, profile, cfg, lane, page, row, ctx, facts, submit, run_dir, finish, summary, meta)
         if not lane.open_form(page, row["board"], row["ats_job_id"]):
             return finish(m.NEEDS_HUMAN, f"could not reach a standard {row['ats']} form")
         if hasattr(lane, "dom_only_questions"):
@@ -495,6 +497,73 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool, headles
         return finish(m.FAILED, f"{type(err).__name__}: {str(err)[:160]}")
     finally:
         page.close()
+
+
+def _process_wizard(conn, profile, cfg, lane, page, row, ctx, facts, submit, run_dir, finish, summary, meta=None) -> dict:
+    """Page-at-a-time application (IBM/Avature): personal page from the profile, then every question page
+    through the same answer bank as the single-page lanes. Stops before Submit unless submitting."""
+    job_id = row["id"]
+    meta = meta or {}
+    resume = str(ROOT / profile["resume_path"])
+    if not lane.open_form(page, row["board"], row["ats_job_id"], resume):
+        return finish(m.NEEDS_HUMAN, f"could not reach the {row['ats']} application (signed out? run `applybot account {row['ats']} --manual`)")
+    filled = lane.fill_personal_page(page, profile, facts)
+    answers_all: dict[str, object] = dict(filled)
+    page.screenshot(path=str(run_dir / "page1.png"), full_page=True)
+    lane._continue(page)
+    if err := lane.page_errors(page):
+        page.screenshot(path=str(run_dir / "page1_error.png"), full_page=True)
+        return finish(m.FAILED, f"personal page rejected: {err}")
+    for page_no in range(2, 8):
+        if lane.at_submit(page):
+            break
+        page.screenshot(path=str(run_dir / f"page{page_no}_before.png"), full_page=True)
+        (run_dir / f"page{page_no}.txt").write_text(page.locator("body").inner_text())
+        census = lane.dom_census(page)
+        presets = lane.preset_page_answers(page, census, facts, meta, resume) if hasattr(lane, "preset_page_answers") else {}
+        chosen = lane.apply_presets(page, presets, census) if presets else {}
+        answers_all.update(chosen)
+        questions = [q for q in lane.page_questions(page, row["company"]) if q.id not in chosen]
+        result = rs.resolve(conn, questions, profile, ctx, {})
+        for q in result.misses:
+            rs.record_miss(conn, q, job_id)
+        for q, why in result.human:
+            if why == "human-only question":
+                rs.record_miss(conn, q, job_id, needs="human")
+        if result.skip_job:
+            return finish(m.SKIPPED_INELIGIBLE, "; ".join(f"{q.label[:60]} ({why})" for q, why in result.skip_job[:2]))
+        if result.human:
+            return finish(m.NEEDS_HUMAN, "; ".join(f"{q.label[:60]} ({why})" for q, why in result.human[:3]))
+        if result.needs_input:
+            return finish(m.NEEDS_INPUT, "; ".join(f"{q.label[:60]} (missing {f})" for q, f in result.needs_input[:3]))
+        if result.misses or result.essays:
+            pending = [q.label[:50] for q in (result.misses + result.essays)[:4]]
+            return finish(m.NEEDS_ANSWERS, f"page {page_no}: {len(result.misses)} unanswered, {len(result.essays)} essays: {pending}")
+        lane.apply_answers(page, result.answers, census)
+        answers_all.update(result.answers)
+        page.screenshot(path=str(run_dir / f"page{page_no}.png"), full_page=True)
+        lane._continue(page)
+        if err := lane.page_errors(page):
+            page.screenshot(path=str(run_dir / f"page{page_no}_error.png"), full_page=True)
+            return finish(m.FAILED, f"page {page_no} rejected: {err}")
+    (run_dir / "answers.json").write_text(json.dumps(answers_all, indent=1, ensure_ascii=False, default=str))
+    if not lane.at_submit(page):
+        page.screenshot(path=str(run_dir / "stuck.png"), full_page=True)
+        return finish(m.NEEDS_HUMAN, f"wizard did not reach Submit (at {page.url[:80]})")
+    page.screenshot(path=str(run_dir / "filled.png"), full_page=True)
+    if not submit:
+        return finish(m.DRY_RUN_DONE, "walked to the Submit page; not submitted (dry run)", filled=len(answers_all))
+    application_id = conn.execute(
+        "INSERT INTO applications (job_id, mode, lane, started_at, run_dir) VALUES (?,?,?,?,?)",
+        (job_id, cfg["mode"], row["ats"], int(time.time()), str(run_dir)),
+    ).lastrowid
+    db.begin_submit(conn, job_id, application_id)
+    outcome, detail = lane.submit(page)
+    page.screenshot(path=str(run_dir / "after_submit.png"), full_page=True)
+    final = {greenhouse.CONFIRMED: m.SUBMITTED, greenhouse.INVALID: m.FAILED}.get(outcome, m.VERIFY)
+    conn.execute("UPDATE applications SET finished_at = ?, outcome = ?, confirmation = ? WHERE id = ?",
+                 (int(time.time()), outcome, detail, application_id))  # fmt: skip
+    return finish(final, f"{outcome}: {detail}")
 
 
 def _wait_for_code(conn, job_id: int, timeout_s: int) -> str | None:
@@ -661,6 +730,53 @@ def resolve_embeds(limit: int = 400):
                          (token, key, f"https://job-boards.greenhouse.io/{token}/jobs/{row['ats_job_id']}", row["id"]))  # fmt: skip
             tally["resolved"] += 1
     typer.echo(json.dumps(dict(tally)))
+
+
+@app.command()
+def account(portal: str, headless: bool = True, manual: bool = typer.Option(False, "--manual", help="Open a visible window and let the user sign in themselves")):
+    """Create (or sign in to) the candidate account a portal requires, in the automation browser. The emailed
+    verification code is handed over with `applybot code 0 <code>`. The password is typed from the Keychain
+    and never printed."""
+    from playwright.sync_api import sync_playwright
+
+    from . import browser, secrets
+    from .forms import ibm
+
+    portals = {"ibm": ibm}
+    if portal not in portals:
+        raise typer.BadParameter("portals with an account step: " + ", ".join(portals))
+    profile = load_profile()
+    password = secrets.ats_password()
+    conn = db.connect()
+    conn.execute("CREATE TABLE IF NOT EXISTS codes (job_id INTEGER PRIMARY KEY, code TEXT NOT NULL)")
+    conn.execute("DELETE FROM codes WHERE job_id = 0")
+    shots = DATA_DIR / "account" / portal
+    shots.mkdir(parents=True, exist_ok=True)
+
+    def get_code():
+        typer.echo(json.dumps({"portal": portal, "event": "needs_code", "hint": "uv run applybot code 0 <code from email>"}))
+        return _wait_for_code(conn, 0, timeout_s=600)
+
+    with sync_playwright() as pw:
+        context = browser.launch(pw, headless=headless)
+        page = context.new_page()
+        try:
+            if manual:
+                page.goto(f"{portals[portal].CAREERS}/Login?jobId=129661", wait_until="domcontentloaded", timeout=60_000)
+                page.bring_to_front()
+                typer.echo(json.dumps({"portal": portal, "event": "sign_in_yourself", "hint": "log in within 10 min; the session is kept"}))
+                deadline = time.time() + 600
+                while time.time() < deadline:
+                    page.wait_for_timeout(3_000)
+                    if "careers.ibm.com" in page.url and "login.ibm.com" not in page.url and "/account/reg" not in page.url:
+                        break
+                state = "signed_in" if portals[portal].signed_in(page) else "not signed in"
+            else:
+                state = portals[portal].run_account(page, profile, password, get_code, shots, lambda ev: typer.echo(json.dumps(ev)))
+            typer.echo(json.dumps({"portal": portal, "status": state[:300]}))
+        finally:
+            page.close()
+            context.close()
 
 
 @app.command()

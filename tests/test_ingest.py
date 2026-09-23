@@ -72,6 +72,11 @@ def test_countries(locations, expected):
     assert countries_of(locations) == expected
 
 
+def test_ibm_postings_are_keyed_by_job_id():
+    assert job_key("https://careers.ibm.com/en_US/careers/JobDetail?jobId=129661&source=WEB_Search_NA") == ("ibm:ibm:129661", "ibm", "ibm", "129661")
+    assert job_key("https://ibmglobal.avature.net/en_US/careers/JobDetail?jobId=89833")[0] == "ibm:ibm:89833"
+
+
 def test_secondary_key_ignores_corporate_suffixes_and_case():
     assert secondary_key("Interac Corp.", "SWE Intern", ["Toronto, ON"]) == secondary_key("interac", "swe intern", ["Toronto, ON"])
 
