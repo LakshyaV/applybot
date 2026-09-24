@@ -369,7 +369,7 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool, headles
 
     def finish(status: str, reason: str = "", **extra) -> dict:
         db.set_status(conn, job_id, status, reason)
-        return {**summary, "status": status, "reason": reason[:160], **extra}
+        return {**summary, "status": status, "reason": reason[:400], **extra}
 
     if filters.is_excluded_company(row["company"], cfg):  # last line of defence, whatever the queue says
         return finish(m.ALREADY_APPLIED, "user already applied to this company by hand")
@@ -387,6 +387,9 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool, headles
     blocked, reason = preflight.check(meta["description"], countries)
     if blocked:
         return finish(blocked, reason)
+    weeks = profile["availability"].get("duration_weeks")
+    if meta.get("program_months_min") and weeks and meta["program_months_min"] * 4 > weeks + 2:
+        return finish(m.SKIPPED_INELIGIBLE, f"posting requires a {meta['program_months_min']}+ month term; user is available {weeks} weeks")
     ctx = rs.JobContext(row["company"], countries)
     facts = rs.Facts(profile, ctx)
     for q in questions:
@@ -494,7 +497,7 @@ def _process(conn, profile: dict, cfg: dict, context, row, submit: bool, headles
         current = conn.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()["status"]
         if current == m.SUBMITTING:
             return finish(m.VERIFY, f"error after submit click: {type(err).__name__}: {str(err)[:120]}")
-        return finish(m.FAILED, f"{type(err).__name__}: {str(err)[:160]}")
+        return finish(m.FAILED, f"{type(err).__name__}: {str(err)[:380]}")
     finally:
         page.close()
 
@@ -505,6 +508,16 @@ def _process_wizard(conn, profile, cfg, lane, page, row, ctx, facts, submit, run
     job_id = row["id"]
     meta = meta or {}
     resume = str(ROOT / profile["resume_path"])
+    if hasattr(lane, "read_posting"):  # the full JD is only readable in the signed-in browser
+        posting = lane.read_posting(page, row["ats_job_id"])
+        if posting.get("already_applied"):
+            return finish(m.ALREADY_APPLIED, "the portal already shows this posting as Applied")
+        blocked, reason = preflight.check(posting["description"], ctx.countries)
+        if blocked:
+            return finish(blocked, reason)
+        weeks = profile["availability"].get("duration_weeks")
+        if posting.get("program_months_min") and weeks and posting["program_months_min"] * 4 > weeks + 2:
+            return finish(m.SKIPPED_INELIGIBLE, f"posting requires a {posting['program_months_min']}+ month term; user is available {weeks} weeks")
     if not lane.open_form(page, row["board"], row["ats_job_id"], resume):
         return finish(m.NEEDS_HUMAN, f"could not reach the {row['ats']} application (signed out? run `applybot account {row['ats']} --manual`)")
     filled = lane.fill_personal_page(page, profile, facts)
@@ -519,28 +532,39 @@ def _process_wizard(conn, profile, cfg, lane, page, row, ctx, facts, submit, run
             break
         page.screenshot(path=str(run_dir / f"page{page_no}_before.png"), full_page=True)
         (run_dir / f"page{page_no}.txt").write_text(page.locator("body").inner_text())
-        census = lane.dom_census(page)
-        presets = lane.preset_page_answers(page, census, facts, meta, resume) if hasattr(lane, "preset_page_answers") else {}
-        chosen = lane.apply_presets(page, presets, census) if presets else {}
-        answers_all.update(chosen)
-        questions = [q for q in lane.page_questions(page, row["company"]) if q.id not in chosen]
-        result = rs.resolve(conn, questions, profile, ctx, {})
-        for q in result.misses:
-            rs.record_miss(conn, q, job_id)
-        for q, why in result.human:
-            if why == "human-only question":
-                rs.record_miss(conn, q, job_id, needs="human")
-        if result.skip_job:
-            return finish(m.SKIPPED_INELIGIBLE, "; ".join(f"{q.label[:60]} ({why})" for q, why in result.skip_job[:2]))
-        if result.human:
-            return finish(m.NEEDS_HUMAN, "; ".join(f"{q.label[:60]} ({why})" for q, why in result.human[:3]))
-        if result.needs_input:
-            return finish(m.NEEDS_INPUT, "; ".join(f"{q.label[:60]} (missing {f})" for q, f in result.needs_input[:3]))
-        if result.misses or result.essays:
-            pending = [q.label[:50] for q in (result.misses + result.essays)[:4]]
-            return finish(m.NEEDS_ANSWERS, f"page {page_no}: {len(result.misses)} unanswered, {len(result.essays)} essays: {pending}")
-        lane.apply_answers(page, result.answers, census)
-        answers_all.update(result.answers)
+        done_on_page: set[str] = set()
+        for _pass in range(4):  # answering one question can reveal follow-ups; keep going until nothing new appears
+            census = lane.dom_census(page)
+            presets = lane.preset_page_answers(page, census, facts, meta, resume) if hasattr(lane, "preset_page_answers") else {}
+            presets = {k: v for k, v in presets.items() if k not in done_on_page}
+            chosen = lane.apply_presets(page, presets, census) if presets else {}
+            answers_all.update(chosen)
+            done_on_page |= set(chosen)
+            # questions come from the SAME census as the presets: a field revealed by a preset is picked up next pass
+            questions = [q for q in lane.page_questions(page, row["company"], census) if q.id not in done_on_page]
+            if not questions:
+                if lane.dom_census(page) != census:
+                    continue  # something new appeared: one more pass
+                break
+            result = rs.resolve(conn, questions, profile, ctx, {})
+            for q in result.misses:
+                rs.record_miss(conn, q, job_id)
+            for q, why in result.human:
+                if why == "human-only question":
+                    rs.record_miss(conn, q, job_id, needs="human")
+            if result.skip_job:
+                return finish(m.SKIPPED_INELIGIBLE, "; ".join(f"{q.label[:60]} ({why})" for q, why in result.skip_job[:2]))
+            if result.human:
+                return finish(m.NEEDS_HUMAN, "; ".join(f"{q.label[:60]} ({why})" for q, why in result.human[:3]))
+            if result.needs_input:
+                return finish(m.NEEDS_INPUT, "; ".join(f"{q.label[:60]} (missing {f})" for q, f in result.needs_input[:3]))
+            if result.misses or result.essays:
+                pending = [q.label[:50] for q in (result.misses + result.essays)[:4]]
+                return finish(m.NEEDS_ANSWERS, f"page {page_no}: {len(result.misses)} unanswered, {len(result.essays)} essays: {pending}")
+            lane.apply_answers(page, result.answers, census)
+            answers_all.update(result.answers)
+            done_on_page |= {q.id for q in questions}
+            page.wait_for_timeout(800)
         page.screenshot(path=str(run_dir / f"page{page_no}.png"), full_page=True)
         lane._continue(page)
         if err := lane.page_errors(page):
@@ -746,7 +770,7 @@ def account(portal: str, headless: bool = True, manual: bool = typer.Option(Fals
     if portal not in portals:
         raise typer.BadParameter("portals with an account step: " + ", ".join(portals))
     profile = load_profile()
-    password = secrets.ats_password()
+    password = secrets.portal_password(portal)
     conn = db.connect()
     conn.execute("CREATE TABLE IF NOT EXISTS codes (job_id INTEGER PRIMARY KEY, code TEXT NOT NULL)")
     conn.execute("DELETE FROM codes WHERE job_id = 0")

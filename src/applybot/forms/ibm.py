@@ -144,21 +144,61 @@ class Gone(Exception):
     pass
 
 
-def fetch(board: str, job_id: str, client=None) -> dict:
-    """The posting's public page (no login): title, location, description."""
+SEARCH_API = "https://www-api.ibm.com/search/api/v2"
+SEARCH_HEADERS = {"content-type": "application/json", "referer": "https://www.ibm.com/", "origin": "https://www.ibm.com",
+                  "user-agent": "Mozilla/5.0"}  # fmt: skip
+_INDEX: dict[str, dict] = {}
+_INDEX_AT = 0.0
+
+
+def _search(country: str, offset: int, size: int = 100) -> list[dict]:
     import httpx
 
-    client = client or httpx.Client(timeout=30, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=True)
-    resp = client.get(f"{CAREERS}/JobDetail", params={"jobId": job_id})
-    if resp.status_code == 404 or "JobDetail" not in str(resp.url):
-        raise Gone(job_id)
+    f = [{"term": {"field_keyword_18": "Internship"}}, {"term": {"field_keyword_05": country}}]
+    body = {"appId": "careers", "scopes": ["careers2"], "query": {"bool": {"must": []}}, "post_filter": {"bool": {"must": f}},
+            "aggs": {"field_keyword_083": {"filter": {"bool": {"must": f}}, "aggs": {"field_keyword_08": {"terms": {"field": "field_keyword_08", "size": 6}}}}},
+            "from": offset, "size": size, "sort": [{"_score": "desc"}, {"pageviews": "desc"}], "lang": "zz", "localeSelector": {},
+            "sm": {"query": "", "lang": "zz"},
+            "_source": ["_id", "title", "url", "description", "field_keyword_05", "field_keyword_08", "field_keyword_17", "field_keyword_19"]}  # fmt: skip
+    resp = httpx.post(SEARCH_API, json=body, headers=SEARCH_HEADERS, timeout=30)
     resp.raise_for_status()
-    html = resp.text
-    title = re.search(r"<title>(.*?)</title>", html, re.S)
-    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html))
-    loc = re.search(r"(Markham|Toronto|Ottawa|Montreal|Vancouver|Calgary|[A-Z][a-z]+, [A-Z]{2}), (Canada|United States|USA)", text)
-    return {"title": (title.group(1) if title else "").split(" - ")[0].strip(), "location": loc.group(0) if loc else "",
-            "description": text[:6000], "job_id": job_id}
+    return resp.json()["hits"]["hits"]
+
+
+def index(force: bool = False) -> dict[str, dict]:
+    """IBM's own careers search index (public, JSON): every internship with title, location, country, description.
+    The job pages themselves sit behind a JS challenge for plain HTTP clients, so this is the schema source."""
+    global _INDEX, _INDEX_AT
+    import time as _time
+
+    if _INDEX and not force and _time.time() - _INDEX_AT < 3600:
+        return _INDEX
+    out: dict[str, dict] = {}
+    for country in ("United States", "Canada"):
+        for offset in range(0, 600, 100):
+            hits = _search(country, offset)
+            for h in hits:
+                src = h["_source"]
+                m_ = re.search(r"jobId=(\d+)", src.get("url", ""))
+                if m_:
+                    out[m_.group(1)] = src
+            if len(hits) < 100:
+                break
+    _INDEX, _INDEX_AT = out, _time.time()
+    return out
+
+
+def fetch(board: str, job_id: str, client=None) -> dict:
+    src = index().get(job_id) or index(force=True).get(job_id)
+    if not src:
+        raise Gone(job_id)
+    location = (src.get("field_keyword_19") or "").strip()
+    if location.lower() in ("multiple cities", "multiple locations"):
+        location = ""
+    country = src.get("field_keyword_05") or ""
+    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", src.get("description") or ""))
+    return {"title": src.get("title", ""), "location": location, "country": country, "description": text[:6000],
+            "workplace": src.get("field_keyword_17") or "", "job_id": job_id}  # fmt: skip
 
 
 def parse(data: dict) -> tuple[list[Question], dict]:
@@ -167,13 +207,27 @@ def parse(data: dict) -> tuple[list[Question], dict]:
     from ..normalize import countries_of
 
     location = data.get("location") or ""
-    countries = countries_of([location]) if location else ["UNKNOWN"]
-    return [], {"title": data.get("title", ""), "location": location, "countries": countries,
-                "description": data.get("description", "")}  # fmt: skip
+    country = {"United States": "USA", "Canada": "Canada"}.get(data.get("country") or "", data.get("country") or "")
+    countries = countries_of([f"{location}, {country}" if location else country]) if (location or country) else ["UNKNOWN"]
+    desc = data.get("description", "")
+    # "Program Duration: 12-16 Months" — a term longer than the applicant's availability is a stated requirement
+    dur = re.search(r"program duration:\s*(\d+)\s*(?:-|–|to)?\s*(\d+)?\s*months?", desc, re.I)
+    return [], {"title": data.get("title", ""), "location": location, "countries": countries, "description": desc,
+                "country": data.get("country", ""), "program_months_min": int(dur.group(1)) if dur else None}  # fmt: skip
 
 
 def preset_answers(questions, facts, resume_path: str) -> dict:
     return {}
+
+
+def read_posting(page, job_id: str) -> dict:
+    """The full job description (the search index only carries a teaser): text plus the stated program duration."""
+    page.goto(f"{CAREERS}/JobDetail?jobId={job_id}", wait_until="domcontentloaded", timeout=60_000)
+    page.wait_for_timeout(6_000)
+    text = re.sub(r"\s+", " ", page.locator("body").inner_text())
+    dur = re.search(r"program duration:\s*(\d+)\s*(?:-|–|to)?\s*(\d+)?\s*months?", text, re.I)
+    return {"description": text[:12000], "program_months_min": int(dur.group(1)) if dur else None,
+            "already_applied": applied_marker(page)}  # fmt: skip
 
 
 def open_form(page, board: str, job_id: str, resume_path: str = "") -> bool:
@@ -238,29 +292,40 @@ def dom_census(page) -> list[dict]:
     }""")
 
 
-def choose2(page, el_id: str, text: str) -> None:
-    """Pick an option in a select2 combobox by typing and choosing the exact match."""
-    page.locator(f'[id="{el_id}"]').locator("xpath=following-sibling::span[contains(@class,'select2')]//span[@role='combobox']").first.click()
-    page.wait_for_timeout(500)
-    page.keyboard.type(text[:40])
-    options = page.locator(".select2-results__option")
-    for _ in range(20):  # the list is fetched asynchronously ("Searching…" until it lands)
+def choose2(page, el_id: str, text: str, attempts: int = 3) -> None:
+    """Pick an option in a select2 combobox by typing and choosing the exact match. The option list is fetched
+    over the network and sometimes fails to load or lags the keystrokes; each attempt reopens the box."""
+    listed: list[str] = []
+    for attempt in range(attempts):
+        page.locator(f'[id="{el_id}"]').locator("xpath=following-sibling::span[contains(@class,'select2')]//span[@role='combobox']").first.click()
         page.wait_for_timeout(500)
-        texts = [options.nth(i).inner_text().strip() for i in range(min(options.count(), 12))]
-        if texts and not any(t.startswith("Searching") for t in texts):
-            break
-    for i in range(options.count()):
-        if options.nth(i).inner_text().strip().lower() == text.lower():
-            options.nth(i).click()
-            page.wait_for_timeout(800)
-            return
-    listed = [options.nth(i).inner_text().strip() for i in range(min(options.count(), 8))]
-    page.keyboard.press("Escape")
-    raise FillError(f"{el_id}: no option {text!r}; offered {listed}")
+        page.keyboard.type(text[:40])
+        options = page.locator(".select2-results__option")
+        for _ in range(20):  # "Searching…" until the list lands
+            page.wait_for_timeout(500)
+            listed = [options.nth(i).inner_text().strip() for i in range(min(options.count(), 12))]
+            if listed and not any(t.startswith("Searching") for t in listed):
+                break
+        for i in range(options.count()):
+            if options.nth(i).inner_text().strip().lower() == text.lower():
+                options.nth(i).click()
+                for _ in range(8):  # the rendered selection updates asynchronously
+                    page.wait_for_timeout(400)
+                    if held2(page, el_id).strip().lower() == text.lower():
+                        return
+                break  # clicked but did not commit: retry
+        page.keyboard.press("Escape")
+        if not any("could not be loaded" in t or t.startswith("Searching") or t.startswith("Loading") for t in listed):
+            break  # the list loaded and the option is simply not there
+        page.wait_for_timeout(1_500)
+    raise FillError(f"{el_id}: no option {text!r}; offered {listed[:8]}")
 
 
 def held2(page, el_id: str) -> str:
-    return (page.locator(f'[id="select2-{el_id}-container"]').first.text_content() or "").strip()
+    box = page.locator(f'[id="select2-{el_id}-container"]').first
+    if not box.count():
+        return ""
+    return (box.get_attribute("title") or box.text_content() or "").strip()
 
 
 def set_radio(page, name: str, label: str) -> bool:
@@ -394,10 +459,10 @@ def fill_personal_page(page, profile: dict, facts) -> dict:
     return filled
 
 
-def page_questions(page, company: str) -> list[Question]:
+def page_questions(page, company: str, census: list[dict] | None = None) -> list[Question]:
     """The current page's controls as resolver Questions (used on the question pages after personal info)."""
     out = []
-    for c in dom_census(page):
+    for c in census if census is not None else dom_census(page):
         if not c["label"]:
             continue
         qtype = {"radio": "select", "select": "select", "select2": "select", "textarea": "textarea",
@@ -447,9 +512,25 @@ def submit(page, wait_ms: int = 30_000) -> tuple[str, str]:
         text = re.sub(r"\s+", " ", page.locator("body").inner_text())[:3000]
         if re.search(r"thank you for applying|application (has been |was )?(submitted|received)|successfully submitted", text, re.I):
             return CONFIRMED, f"url={page.url}"
+        if applied_marker(page):
+            return CONFIRMED, f"job page shows Applied; url={page.url}"
         if page_errors(page):
             return INVALID, page_errors(page)
     return UNKNOWN, f"url={page.url}"
+
+
+def applied_marker(page) -> bool:
+    """After a submit IBM returns to the job page with its Apply button replaced by a disabled 'Applied'."""
+    if "JobDetail" not in page.url:
+        return False
+    return bool(page.locator("a.button--disabled, button.button--disabled").filter(has_text=re.compile(r"^\s*applied\s*$", re.I)).count())
+
+
+def already_applied(page, job_id: str) -> bool:
+    """Reconciliation for a job left in `verify`: the job page says Applied."""
+    page.goto(f"{CAREERS}/JobDetail?jobId={job_id}", wait_until="domcontentloaded", timeout=60_000)
+    page.wait_for_timeout(7_000)
+    return applied_marker(page)
 
 
 # Questionnaire fields the lane answers itself: their options are loaded lazily (select2), so the bank cannot hold a
@@ -459,7 +540,14 @@ PAGE_PRESETS = [
     (re.compile(r"^what is your preferred internship duration", re.I), ["4 months", "4 Months", "4-month", "4 month", "Four months"]),
     (re.compile(r"^correspondence language", re.I), ["English"]),
     (re.compile(r"^do you need to complete an internship as part of your degree", re.I), ["Yes"]),
-    (re.compile(r"^please state your ethnic group", re.I), ["Do not wish to declare", "Do not wish to respond", "Prefer not to say", "I do not wish to answer"]),
+    (re.compile(r"^please state your ethnic group", re.I), ["Do not want to declare", "Do not wish to declare", "Do not wish to respond", "Prefer not to say", "I do not wish to answer"]),
+    (re.compile(r"^please select the country where your university", re.I), ["Canada"]),
+    (re.compile(r"^please select the university or higher-education institution", re.I), ["University of Waterloo", "Waterloo, University of", "University Of Waterloo"]),
+    (re.compile(r"^degree obtained or currently in progress", re.I), ["Bachelor's Degree", "Bachelors", "Bachelor", "Bachelor's", "Undergraduate"]),
+    (re.compile(r"^graduation date \(completed", re.I), "grad_date"),
+    (re.compile(r"^study/specialization of degree", re.I), ["Software Engineering", "Computer Science", "Engineering", "Computer Engineering", "Other"]),
+    # revealed after the sponsorship answer; the option texts are IBM's own, tried per the applicant's status
+    (re.compile(r"^please specify your current work authorization", re.I), "WORK_AUTH"),
     (re.compile(r"^month$", re.I), "birth_month_name"),
     (re.compile(r"^day$", re.I), "birth_day"),
     (re.compile(r"^name$", re.I), "full_name"),
@@ -470,18 +558,31 @@ PAGE_PRESETS = [
 def preset_page_answers(page, census: list[dict], facts, meta: dict, resume_path: str) -> dict:
     """Answers for the questionnaire fields the lane owns. Returns {field id: value | [candidates]}."""
     out: dict[str, object] = {}
-    city = (meta.get("location") or "").split(",")[0].strip()
+    city = (meta.get("location") or "").split(",")[0].strip().title()  # "POUGHKEEPSIE, US" → "Poughkeepsie"
     for c in census:
         label = c["label"]
         if c["kind"] == "file" and re.search(r"resume|cv", label, re.I):
             out[c["id"]] = resume_path
             continue
         if re.search(r"^what is your preferred work location", label, re.I):
-            out[c["id"]] = [city] if city else []
+            # the list holds IBM's main sites; a posting in a suburb maps to its metro (Markham → Toronto)
+            metro = {"Markham": "Toronto", "Mississauga": "Toronto", "Brampton": "Toronto", "Kanata": "Ottawa", "Bromont": "Montreal",
+                     "Poughkeepsie": "Poughkeepsie", "Rtp": "Research Triangle Park", "Research Triangle Park": "Research Triangle Park"}
+            out[c["id"]] = [x for x in [city, metro.get(city, ""), "Toronto" if meta.get("country") == "Canada" else "",
+                                        "Any", "Any location", "No preference", "Multiple locations", "Flexible"] if x]
             continue
         for rx, value in PAGE_PRESETS:
             if rx.search(label):
-                if isinstance(value, list):
+                if value == "WORK_AUTH":
+                    if facts.get("work_authorized") is True:      # Canada: citizen, no sponsorship
+                        out[c["id"]] = ["Canadian Citizen / Canadian Permanent Residency", "Canadian Citizen", "Citizen",
+                                        "Canadian Citizen or Permanent Resident", "Citizen / Permanent Resident"]
+                    elif facts.get("requires_sponsorship") is True:  # US: no status yet; the honest pick is the sponsorship one
+                        out[c["id"]] = ["Require sponsorship", "Requires sponsorship", "I require sponsorship", "Will require sponsorship",
+                                        "Need sponsorship", "Not authorized - require sponsorship", "Sponsorship required", "Other"]
+                    else:
+                        out[c["id"]] = []
+                elif isinstance(value, list):
                     out[c["id"]] = value
                 else:
                     fact = facts.get(value)
@@ -504,6 +605,16 @@ def apply_presets(page, presets: dict, census: list[dict]) -> dict:
             chosen[el_id] = str(value).rsplit("/", 1)[-1]
             continue
         candidates = value if isinstance(value, list) else [value]
+        if c["kind"] == "date":  # native date inputs take ISO only: "April 2029" → 2029-04-01
+            iso = []
+            for cand in candidates:
+                m_ = re.fullmatch(r"([A-Za-z]+) (\d{4})", str(cand))
+                if m_:
+                    months = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"]
+                    iso.append(f"{m_.group(2)}-{months.index(m_.group(1).lower()) + 1:02d}-01")
+                else:
+                    iso.append(str(cand))
+            candidates = iso
         last = None
         for cand in candidates:
             try:
@@ -520,5 +631,14 @@ def apply_presets(page, presets: dict, census: list[dict]) -> dict:
             except Exception as err:  # noqa: BLE001 — try the next candidate
                 last = err
         else:
-            raise FillError(f"{el_id} ({c['label'][:40]}): none of {candidates} could be chosen ({last})")
+            offered = []
+            if c["kind"] == "select2":  # list what the dropdown actually offers so the preset can be fixed
+                try:
+                    page.locator(f'[id="{el_id}"]').locator("xpath=following-sibling::span[contains(@class,'select2')]//span[@role='combobox']").first.click()
+                    page.wait_for_timeout(1_500)
+                    offered = [o.inner_text().strip() for o in page.locator(".select2-results__option").all()][:15]
+                    page.keyboard.press("Escape")
+                except Exception:  # noqa: BLE001
+                    pass
+            raise FillError(f"{el_id} ({c['label'][:40]}): none of {candidates} could be chosen; offered {offered}; last error: {str(last)[:160]}")
     return chosen
