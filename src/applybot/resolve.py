@@ -554,7 +554,8 @@ def resolve(conn: sqlite3.Connection, questions: list[Question], profile: dict, 
 # A question that NAMES a country is about that country, whatever the posting's location and whatever fact a
 # proposer picked. "Are you authorized to work in the United States?" on a Toronto posting is still about the US.
 # "US" must be upper-case to count (otherwise "tell us about…" would match); the spelled-out forms are case-blind.
-NAMED_US_RE = re.compile(r"(?i:\bunited states\b|\bu\.s\b|\bu\.s\.a\b|\busa\b|\bamerica\b)|\bUS\b")
+# "Latin/South/North/Central America" name regions, not the United States
+NAMED_US_RE = re.compile(r"(?i:\bunited states\b|\bu\.s\b|\bu\.s\.a\b|\busa\b|(?<!latin )(?<!south )(?<!north )(?<!central )\bamerica\b)|\bUS\b")
 NAMED_CA_RE = re.compile(r"\bcanad(a|ian)\b", re.I)
 NAMED_OTHER_RE = re.compile(
     r"\b(united kingdom|uk|u\.k|britain|british|england|english|ireland|irish|france|french|germany|german|"
