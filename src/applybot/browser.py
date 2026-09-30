@@ -17,11 +17,14 @@ ARGS = ["--disable-renderer-backgrounding", "--disable-backgrounding-occluded-wi
         "--disable-background-timer-throttling"]  # fmt: skip
 
 
-def launch(pw: Playwright, headless: bool = False) -> BrowserContext:
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    os.chmod(PROFILE_DIR.parent, 0o700)
+def launch(pw: Playwright, headless: bool = False, profile: str = "") -> BrowserContext:
+    """One persistent Chrome profile per lane family (a profile can only be open in one process at a time):
+    the default profile for Greenhouse/Ashby/IBM, `profile="workday"` for the Workday tenants, and so on."""
+    profile_dir = PROFILE_DIR if not profile else PROFILE_DIR.parent / f"chrome-{profile}"
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(profile_dir.parent, 0o700)
     context = pw.chromium.launch_persistent_context(
-        str(PROFILE_DIR), channel="chrome", headless=headless, viewport={"width": 1280, "height": 900}, args=ARGS
+        str(profile_dir), channel="chrome", headless=headless, viewport={"width": 1280, "height": 900}, args=ARGS
     )
     context.set_default_timeout(15_000)
     return context

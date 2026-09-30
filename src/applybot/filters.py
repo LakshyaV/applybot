@@ -62,6 +62,8 @@ def company_bonus(company: str, cfg: dict) -> int:
     bonuses = [tier.get("bonus", 0) for tier in cfg.get("company_tiers") or [] if _company_in(company, tier.get("companies"))]
     if is_priority_company(company, cfg):
         bonuses.append(cfg.get("priority_company_bonus", 0))
+    if any(b < 0 for b in bonuses):  # a deprioritised company stays deprioritised whatever else lists it
+        return min(bonuses)
     return max(bonuses, default=0)
 
 

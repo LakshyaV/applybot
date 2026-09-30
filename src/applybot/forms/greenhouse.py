@@ -101,6 +101,8 @@ def open_form(page, board: str, job_id: str) -> bool:
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=45_000)
             page.locator("form #first_name").wait_for(state="visible", timeout=15_000)
+            if "greenhouse.io" not in page.url:
+                continue  # the hosted page redirected to the employer's own custom form (Jane Street): use the embed
             page.wait_for_timeout(1_500)  # let lazy sections (education block, custom questions) mount
             return True
         except Exception:  # noqa: BLE001 — try the next address

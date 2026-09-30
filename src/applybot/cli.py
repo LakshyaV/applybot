@@ -519,7 +519,16 @@ def _process_wizard(conn, profile, cfg, lane, page, row, ctx, facts, submit, run
         if posting.get("program_months_min") and weeks and posting["program_months_min"] * 4 > weeks + 2:
             return finish(m.SKIPPED_INELIGIBLE, f"posting requires a {posting['program_months_min']}+ month term; user is available {weeks} weeks")
     if not lane.open_form(page, row["board"], row["ats_job_id"], resume):
-        return finish(m.NEEDS_HUMAN, f"could not reach the {row['ats']} application (signed out? run `applybot account {row['ats']} --manual`)")
+        # signed out (portal sessions lapse daily): sign back in with the Keychain password, asking for an emailed code if the portal wants one
+        from . import secrets
+
+        def get_code():
+            typer.echo(json.dumps({**summary, "event": "needs_code", "hint": f"uv run applybot code 0 <code from the {row['ats']} email>"}))
+            return _wait_for_code(conn, 0, timeout_s=1200)
+
+        state = lane.run_account(page, profile, secrets.portal_password(row["ats"]), get_code, run_dir, lambda ev: None)
+        if state != "signed_in" or not lane.open_form(page, row["board"], row["ats_job_id"], resume):
+            return finish(m.NEEDS_HUMAN, f"could not sign in to {row['ats']}: {state[:120]}")
     filled = lane.fill_personal_page(page, profile, facts)
     answers_all: dict[str, object] = dict(filled)
     page.screenshot(path=str(run_dir / "page1.png"), full_page=True)

@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 
 CAREERS = "https://careers.ibm.com/en_US/careers"
-CODE_RE = re.compile(r"verification code|verify your email|enter the (\d-digit )?code|code (we )?sent|one-time code", re.I)
+CODE_RE = re.compile(r"verification code|verify your email|enter the (\d-digit )?code|code (we )?sent|one-time code|enter email code", re.I)
 MARKETING_RE = re.compile(r"marketing|communications|newsletter|offers|promotions|keep me informed|updates about", re.I)
 ACCOUNT_TERMS_RE = re.compile(r"privacy statement|terms of use|terms and conditions|account privacy|i accept|i agree", re.I)
 
@@ -71,6 +71,9 @@ def run_account(page, profile: dict, password: str, get_code, shots: Path, log) 
         user = page.locator("#username")
         if user.count() and user.first.is_visible() and not user.first.input_value():
             user.first.fill(ident["email"])
+            remember = page.locator("#remember")
+            if remember.count() and not remember.is_checked():
+                remember.check(force=True)  # keeps the MFA trust so the emailed code is not asked every run
             _click_next(page)
             page.wait_for_timeout(4_000)
             # an unknown IBMid is offered a registration link; a known one gets the password box
@@ -105,7 +108,8 @@ def run_account(page, profile: dict, password: str, get_code, shots: Path, log) 
         if codes.count() and codes.first.is_visible() or CODE_RE.search(text):
             code = get_code()
             if not code:
-                return "no code within 10 min"
+                return "no code within the wait"
+            code = code.strip().split("-")[-1]  # the box shows a "V1234-" prefix; only the 6 digits are typed
             boxes = _code_inputs(page)
             if boxes.count() >= len(code) and boxes.first.get_attribute("maxlength") == "1":
                 for i, ch in enumerate(code):
@@ -242,7 +246,11 @@ def open_form(page, board: str, job_id: str, resume_path: str = "") -> bool:
         page.locator("#resumeFile").set_input_files(resume_path)
         page.wait_for_timeout(2_500)
         btn = page.locator("#uploadFileResume")
-        (btn if btn.is_visible() else page.get_by_role("button", name=re.compile(r"^continue$", re.I)).filter(visible=True).first).click()
+        try:
+            btn.wait_for(state="visible", timeout=8_000)
+            btn.click()
+        except Exception:  # noqa: BLE001 — the button sits in a collapsed panel on some renders
+            page.evaluate("() => document.getElementById('uploadFileResume').click()")
         page.wait_for_timeout(8_000)
     nothanks = page.get_by_label(re.compile(r"no thanks", re.I))
     if nothanks.count():
@@ -548,6 +556,12 @@ PAGE_PRESETS = [
     (re.compile(r"^study/specialization of degree", re.I), ["Software Engineering", "Computer Science", "Engineering", "Computer Engineering", "Other"]),
     # revealed after the sponsorship answer; the option texts are IBM's own, tried per the applicant's status
     (re.compile(r"^please specify your current work authorization", re.I), "WORK_AUTH"),
+    (re.compile(r"^what best describes your level of experience in continuous integration", re.I),
+     ["Demonstrated Experience. I am proficient in performing this skill across routine or predictable situations with little direction / support.",
+      "I have experience performing this work behavior across routine or predictable situations with minimal supervision or guidance."]),
+    (re.compile(r"^what is your level of french proficiency", re.I), ["None", "No proficiency", "Not proficient", "Beginner", "Basic"]),
+    (re.compile(r"^first choice$", re.I), "POSTING_CITY"),
+    (re.compile(r"^if answered yes, follow up question asking candidates to list their top 3", re.I), "POSTING_CITY"),
     (re.compile(r"^month$", re.I), "birth_month_name"),
     (re.compile(r"^day$", re.I), "birth_day"),
     (re.compile(r"^name$", re.I), "full_name"),
@@ -573,7 +587,9 @@ def preset_page_answers(page, census: list[dict], facts, meta: dict, resume_path
             continue
         for rx, value in PAGE_PRESETS:
             if rx.search(label):
-                if value == "WORK_AUTH":
+                if value == "POSTING_CITY":
+                    out[c["id"]] = city or "Any of the posted locations"
+                elif value == "WORK_AUTH":
                     if facts.get("work_authorized") is True:      # Canada: citizen, no sponsorship
                         out[c["id"]] = ["Canadian Citizen / Canadian Permanent Residency", "Canadian Citizen", "Citizen",
                                         "Canadian Citizen or Permanent Resident", "Citizen / Permanent Resident"]
